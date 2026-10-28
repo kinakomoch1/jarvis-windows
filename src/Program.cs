@@ -175,7 +175,7 @@ public sealed class JarvisForm : Form
                 "スポティファイを開いて", "スポティファイを起動して",
                 "TikTokを開いて", "ティックトックを開いて", "ティックトックを起動して",
                 "Xを開いて", "エックスを開いて", "ツイッターを開いて",
-                "VyLiteを開いて", "VyLiteを起動して", "ブイライトを開いて", "ブイライトを起動して",
+                "VyLiteを開いて", "VyLiteを起動して", "バイライトを開いて", "バイライトを起動して",
                 "ディスコードを起動して", "ディスコードを開いて",
                 "メモ帳を起動して", "メモ帳を開いて",
                 "ブラウザを起動して", "ブラウザを開いて",
@@ -421,7 +421,7 @@ public sealed class JarvisForm : Form
             Say("Xをブラウザで開くよう指示しました。");
             return;
         }
-        if (normalized is "vylite" or "ブイライト" or "ヴァイライト" or "ヴィライト")
+        if (normalized is "vylite" or "バイライト" or "ブイライト" or "ヴァイライト" or "ヴィライト")
         {
             await LaunchVyLiteAsync();
             return;
