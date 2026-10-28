@@ -113,7 +113,7 @@ public sealed class JarvisForm : Form
             var info = SpeechRecognitionEngine.InstalledRecognizers().FirstOrDefault(r => r.Culture.Name.StartsWith("ja", StringComparison.OrdinalIgnoreCase));
             if (info == null) { Log("日本語のWindows音声認識エンジンが見つかりません。文字入力は使用できます。"); return; }
             recognizer = new SpeechRecognitionEngine(info);
-            var choices = new Choices("ジャービス", "じゃーびす", "ジャービス起動", "おやすみ", "ディスコードを開いて", "メモ帳を開いて", "ブラウザを開いて", "PCの状態を教えて");
+            var choices = new Choices("ジャービス", "じゃーびす", "ジャービス起動", "おやすみ", "ディスコードを開いて", "メモ帳を開いて", "ブラウザを開いて", "エクスプローラーを開いて", "電卓を開いて", "PCの状態を教えて");
             recognizer.LoadGrammar(new Grammar(new GrammarBuilder(choices) { Culture = info.Culture }));
             recognizer.SetInputToDefaultAudioDevice();
             recognizer.SpeechRecognized += (_, e) =>
@@ -158,11 +158,11 @@ public sealed class JarvisForm : Form
         try
         {
             if (input.Contains("おやすみ")) { awake = false; Say("承知しました。またいつでもお呼びください。"); return; }
-            if (input.Contains("メモ帳") && (input.Contains("開") || input.Contains("起動"))) { Process.Start(new ProcessStartInfo("notepad.exe") { UseShellExecute = true }); Say("メモ帳を起動しました。"); return; }
-            if ((input.Contains("ブラウザ") || input.Contains("ウェブ")) && (input.Contains("開") || input.Contains("起動"))) { Process.Start(new ProcessStartInfo("https://www.google.com") { UseShellExecute = true }); Say("ブラウザを起動しました。"); return; }
-            if (input.Contains("Discord", StringComparison.OrdinalIgnoreCase) || input.Contains("ディスコード"))
+            // PC操作はAIへ渡す前にローカルで判定。曖昧なアプリ名は確認する。
+            if (TryExtractLaunchTarget(input, out var target))
             {
-                if (input.Contains("開") || input.Contains("起動")) { Process.Start(new ProcessStartInfo("discord://") { UseShellExecute = true }); Say("Discordを起動します。"); return; }
+                await LaunchApplicationAsync(target);
+                return;
             }
             if (input.Contains("状態") || input.Contains("メモリ"))
             {
@@ -178,6 +178,103 @@ public sealed class JarvisForm : Form
         catch (Exception ex) { Log("エラー: " + ex.Message); Say("処理に失敗しました。ログをご確認ください。"); }
         finally { busy = false; }
     }
+    private static bool TryExtractLaunchTarget(string input, out string target)
+    {
+        target = "";
+        var text = input.Trim().TrimEnd('。', '！', '!', '？', '?');
+        foreach (var prefix in new[] { "ジャービス、", "ジャービス ", "ジャービス", "じゃーびす、", "じゃーびす" })
+            if (text.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) { text = text[prefix.Length..].Trim(); break; }
+        // 「開く」という単語だけで誤作動しないよう、アプリ名と操作動詞の両方を要求する。
+        foreach (var suffix in new[] { "を開いてください", "を起動してください", "を開いて", "を起動して", "を開く", "を起動", "開いてください", "起動してください", "開いて", "起動して", "を開けて" })
+        {
+            if (!text.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)) continue;
+            target = text[..^suffix.Length].Trim().TrimEnd('を').Trim();
+            return target.Length > 0 && target.Length <= 80;
+        }
+        return false;
+    }
+
+    private static string NormalizeAppName(string name)
+    {
+        var sb = new StringBuilder();
+        foreach (var c in name.ToLowerInvariant().Normalize(NormalizationForm.FormKC))
+            if (!char.IsWhiteSpace(c) && c != '-' && c != '_' && c != '・' && c != '.') sb.Append(c);
+        return sb.ToString();
+    }
+
+    private sealed record AppCandidate(string Name, string Path);
+
+    private static List<AppCandidate> FindInstalledApps()
+    {
+        var roots = new[]
+        {
+            Environment.GetFolderPath(Environment.SpecialFolder.StartMenu),
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu),
+            Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory)
+        };
+        var apps = new List<AppCandidate>();
+        foreach (var root in roots.Where(Directory.Exists).Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            try
+            {
+                foreach (var path in Directory.EnumerateFiles(root, "*.lnk", SearchOption.AllDirectories).Take(2500))
+                {
+                    var name = Path.GetFileNameWithoutExtension(path);
+                    if (!string.IsNullOrWhiteSpace(name) && !name.Contains("Uninstall", StringComparison.OrdinalIgnoreCase) && !name.Contains("アンインストール"))
+                        apps.Add(new AppCandidate(name, path));
+                }
+            }
+            catch (UnauthorizedAccessException) { }
+            catch (IOException) { }
+        }
+        return apps.GroupBy(x => x.Path, StringComparer.OrdinalIgnoreCase).Select(x => x.First()).ToList();
+    }
+
+    private async Task LaunchApplicationAsync(string target)
+    {
+        var normalized = NormalizeAppName(target);
+        // 起動先を固定したWindows標準アプリ。AI生成コマンドや任意のシェル文字列は実行しない。
+        var builtins = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["エクスプローラー"] = "explorer.exe", ["エクスプローラ"] = "explorer.exe",
+            ["ファイルエクスプローラー"] = "explorer.exe",
+            ["メモ帳"] = "notepad.exe", ["notepad"] = "notepad.exe",
+            ["電卓"] = "calc.exe", ["calculator"] = "calc.exe",
+            ["ペイント"] = "mspaint.exe", ["paint"] = "mspaint.exe",
+            ["タスクマネージャー"] = "taskmgr.exe", ["タスクマネージャ"] = "taskmgr.exe",
+            ["コントロールパネル"] = "control.exe", ["設定"] = "ms-settings:",
+            ["ブラウザ"] = "https://www.google.com", ["ウェブ"] = "https://www.google.com",
+            ["discord"] = "discord://", ["ディスコード"] = "discord://"
+        };
+        var builtin = builtins.FirstOrDefault(x => NormalizeAppName(x.Key) == normalized);
+        if (builtin.Key != null)
+        {
+            Process.Start(new ProcessStartInfo(builtin.Value) { UseShellExecute = true });
+            Say($"{target}を起動しました。");
+            return;
+        }
+        var apps = await Task.Run(FindInstalledApps);
+        var exact = apps.Where(x => NormalizeAppName(x.Name) == normalized).ToList();
+        var matches = exact.Count > 0 ? exact : apps.Where(x => NormalizeAppName(x.Name).StartsWith(normalized, StringComparison.OrdinalIgnoreCase)).ToList();
+        if (matches.Count == 0)
+        {
+            Say($"{target}が見つかりませんでした。スタートメニューに登録されている名前で指定してください。");
+            return;
+        }
+        if (matches.Count > 1)
+        {
+            var names = string.Join("、", matches.Select(x => x.Name).Distinct().Take(5));
+            Say($"{target}に一致するアプリが複数あります。名前を詳しく指定してください。候補は{names}です。");
+            return;
+        }
+        var app = matches[0];
+        var result = MessageBox.Show($"次のアプリを起動しますか？\n{app.Name}\n{app.Path}", "JARVIS アプリ起動の確認", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+        if (result != DialogResult.Yes) { Say("起動をキャンセルしました。"); return; }
+        Process.Start(new ProcessStartInfo(app.Path) { UseShellExecute = true });
+        Say($"{app.Name}を起動しました。");
+    }
+
     private async Task AnalyzeScreenAsync()
     {
         if (busy) return;
