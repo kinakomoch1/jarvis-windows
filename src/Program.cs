@@ -39,6 +39,8 @@ public sealed class JarvisForm : Form
     private readonly NotifyIcon tray;
     private readonly SpeechSynthesizer speaker = new();
     private SpeechRecognitionEngine? recognizer;
+    private Grammar? commandGrammar;
+    private Grammar? dictationGrammar;
     private bool awake = false;
     private bool busy = false;
     private bool exiting = false;
@@ -98,7 +100,7 @@ public sealed class JarvisForm : Form
         listening.CheckedChanged += (_, _) => { if (listening.Checked) StartRecognition(); else StopRecognition(); };
         proactive.CheckedChanged += (_, _) => { if (proactive.Checked) { CheckHealth(); healthTimer.Start(); } else healthTimer.Stop(); };
         healthTimer.Tick += (_, _) => CheckHealth();
-        voiceWindow.Tick += (_, _) => { awake = false; voiceWindow.Stop(); Log("音声指示の受付を終了しました。"); };
+        voiceWindow.Tick += (_, _) => { awake = false; voiceWindow.Stop(); if (commandGrammar != null) commandGrammar.Enabled = false; if (dictationGrammar != null) dictationGrammar.Enabled = false; Log("音声指示の受付を終了しました。"); };
         try { speaker.SetOutputToDefaultAudioDevice(); SelectVoice(); } catch (Exception ex) { Log("音声合成を初期化できません: " + ex.Message); }
         Shown += (_, _) => { Log("起動しました。『ジャービス』と呼びかけるか、文字を入力してください。"); StartRecognition(); if (proactive.Checked) { CheckHealth(); healthTimer.Start(); } };
     }
@@ -153,39 +155,58 @@ public sealed class JarvisForm : Form
         if (recognizer != null || !listening.Checked) return;
         try
         {
-            var info = SpeechRecognitionEngine.InstalledRecognizers().FirstOrDefault(r => r.Culture.Name.StartsWith("ja", StringComparison.OrdinalIgnoreCase));
+            var info = SpeechRecognitionEngine.InstalledRecognizers()
+                .FirstOrDefault(r => r.Culture.Name.StartsWith("ja", StringComparison.OrdinalIgnoreCase));
             if (info == null) { Log("日本語のWindows音声認識エンジンが見つかりません。"); return; }
+
             recognizer = new SpeechRecognitionEngine(info);
             var wake = new Choices("ジャービス", "じゃーびす", "ジャービス起動");
             recognizer.LoadGrammar(new Grammar(new GrammarBuilder(wake) { Culture = info.Culture }) { Name = "Wake" });
-            // Wake and dictation grammars coexist; commands are only acted on after wake.
-            recognizer.LoadGrammar(new DictationGrammar { Name = "FreeSpeech" });
+
+            // A fixed grammar makes essential local actions more reliable than dictation alone.
+            var commands = new Choices(
+                "フォートナイトを起動して", "フォートナイトを開いて",
+                "フォートナイト起動", "フォートナイト開いて",
+                "ディスコードを起動して", "ディスコードを開いて",
+                "メモ帳を起動して", "メモ帳を開いて",
+                "ブラウザを起動して", "ブラウザを開いて",
+                "電卓を起動して", "電卓を開いて",
+                "メモリの状態を教えて", "PCの状態を教えて");
+            commandGrammar = new Grammar(new GrammarBuilder(commands) { Culture = info.Culture }) { Name = "Commands", Enabled = false };
+            recognizer.LoadGrammar(commandGrammar);
+            dictationGrammar = new DictationGrammar { Name = "FreeSpeech", Enabled = false };
+            recognizer.LoadGrammar(dictationGrammar);
             recognizer.SetInputToDefaultAudioDevice();
             recognizer.SpeechRecognized += (_, e) =>
             {
                 var heard = e.Result.Text.Trim();
-                var isWake = heard.Contains("ジャービス") || heard.Contains("じゃーびす");
-                if (e.Result.Confidence < (isWake ? 0.68 : 0.55)) return;
+                var isWake = e.Result.Grammar.Name == "Wake";
+                if (e.Result.Confidence < (isWake ? 0.60 : 0.45)) return;
+                if (!IsHandleCreated || IsDisposed) return;
                 BeginInvoke(async () =>
                 {
-                    if (speaker.State == SynthesizerState.Speaking || busy) return;
+                    if (busy || IsDisposed) return;
                     Log("音声認識: " + heard);
                     if (isWake)
                     {
                         awake = true;
                         voiceWindow.Stop();
                         voiceWindow.Start();
+                        if (commandGrammar != null) commandGrammar.Enabled = true;
+                        if (dictationGrammar != null) dictationGrammar.Enabled = true;
                         Say("はい、何でしょうか？");
                         return;
                     }
-                    if (!awake) return;
+                    if (!awake || speaker.State == SynthesizerState.Speaking) return;
                     awake = false;
                     voiceWindow.Stop();
+                    if (commandGrammar != null) commandGrammar.Enabled = false;
+                    if (dictationGrammar != null) dictationGrammar.Enabled = false;
                     await HandleCommandAsync(heard);
                 });
             };
             recognizer.RecognizeAsync(RecognizeMode.Multiple);
-            Log("音声認識を開始しました。呼びかけ後20秒間、自由な指示を受け付けます。");
+            Log("音声認識を開始しました。『ジャービス』の後にアプリ名と『起動して』を話してください。");
         }
         catch (Exception ex) { Log("音声認識を開始できません: " + ex.Message); StopRecognition(); }
     }
@@ -196,6 +217,8 @@ public sealed class JarvisForm : Form
         if (recognizer == null) return;
         try { recognizer.RecognizeAsyncCancel(); recognizer.Dispose(); } catch { }
         recognizer = null;
+        commandGrammar = null;
+        dictationGrammar = null;
     }
     private static bool GetStartup()
     {
