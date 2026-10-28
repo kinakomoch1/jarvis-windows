@@ -1,4 +1,3 @@
-using System.Runtime.InteropServices;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Imaging;
@@ -38,18 +37,6 @@ public sealed class JarvisForm : Form
     private bool awake = false;
     private bool busy = false;
     private bool exiting = false;
-    private bool dictationMode = false;
-    private bool switchBackToWake = false;
-    private DateTime wakeUntil = DateTime.MinValue;
-    private Grammar? wakeGrammar;
-    private Grammar? freeGrammar;
-    [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr hWnd);
-    [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
-    [DllImport("user32.dll")] private static extern void keybd_event(byte key, byte scan, uint flags, UIntPtr extra);
-    private static void KeyDown(byte key) => keybd_event(key, 0, 0, UIntPtr.Zero);
-    private static void KeyUp(byte key) => keybd_event(key, 0, 2, UIntPtr.Zero);
-    private static void Hotkey(params byte[] keys) { foreach (var key in keys) KeyDown(key); for (int i=keys.Length-1;i>=0;i--) KeyUp(keys[i]); }
-
     private readonly HttpClient http = new() { Timeout = TimeSpan.FromMinutes(5) };
     private readonly List<(string Role, string Content)> history = new();
 
@@ -126,82 +113,29 @@ public sealed class JarvisForm : Form
             var info = SpeechRecognitionEngine.InstalledRecognizers().FirstOrDefault(r => r.Culture.Name.StartsWith("ja", StringComparison.OrdinalIgnoreCase));
             if (info == null) { Log("日本語のWindows音声認識エンジンが見つかりません。文字入力は使用できます。"); return; }
             recognizer = new SpeechRecognitionEngine(info);
-            // ウェイクワードは限定文法で確実に検出し、その後は自由な日本語ディクテーションへ切り替える。
-            var choices = new Choices("ジャービス", "じゃーびす", "ジャービス起動");
-            wakeGrammar = new Grammar(new GrammarBuilder(choices) { Culture = info.Culture }) { Name = "Wake" };
-            recognizer.LoadGrammar(wakeGrammar);
-            freeGrammar = new DictationGrammar() { Name = "FreeSpeech" };
+            var choices = new Choices("ジャービス", "じゃーびす", "ジャービス起動", "おやすみ", "ディスコードを開いて", "メモ帳を開いて", "ブラウザを開いて", "エクスプローラーを開いて", "電卓を開いて", "PCの状態を教えて");
+            recognizer.LoadGrammar(new Grammar(new GrammarBuilder(choices) { Culture = info.Culture }));
             recognizer.SetInputToDefaultAudioDevice();
             recognizer.SpeechRecognized += (_, e) =>
             {
-                var heard = e.Result.Text.Trim();
-                if (e.Result.Confidence < (dictationMode ? 0.42 : 0.65)) return;
+                if (e.Result.Confidence < 0.65) return;
+                var heard = e.Result.Text;
                 BeginInvoke(async () =>
                 {
-                    if (!dictationMode)
-                    {
-                        if (heard.Contains("ジャービス") || heard.Contains("じゃーびす"))
-                        {
-                            awake = true;
-                            wakeUntil = DateTime.Now.AddSeconds(20);
-                            Say("はい、どうぞ。");
-                            try
-                            {
-                                recognizer?.RequestRecognizerUpdate();
-                            }
-                            catch (Exception ex) { Log("音声切替エラー: " + ex.Message); }
-                        }
-                        return;
-                    }
-                    if (DateTime.Now > wakeUntil) { SwitchToWakeMode(); return; }
-                    if (!busy)
-                    {
-                        SwitchToWakeMode();
-                        await HandleCommandAsync(heard);
-                    }
+                    if (heard.Contains("ジャービス") || heard.Contains("じゃーびす")) { awake = true; Say("はい、何でしょうか？ 画面に指示を入力するか、対応する音声コマンドをお話しください。"); }
+                    else if (awake) { await HandleCommandAsync(heard); }
                 });
-            };
-            recognizer.RecognizerUpdateReached += (_, _) =>
-            {
-                if (recognizer == null || freeGrammar == null || wakeGrammar == null) return;
-                try
-                {
-                    if (switchBackToWake)
-                    {
-                        recognizer.UnloadGrammar(freeGrammar);
-                        recognizer.LoadGrammar(wakeGrammar);
-                        dictationMode = false;
-                        switchBackToWake = false;
-                        awake = false;
-                    }
-                    else
-                    {
-                        recognizer.UnloadGrammar(wakeGrammar);
-                        recognizer.LoadGrammar(freeGrammar);
-                        dictationMode = true;
-                        Log("音声指示を受け付けています（20秒以内）。");
-                    }
-                }
-                catch (Exception ex) { Log("音声認識切替エラー: " + ex.Message); }
             };
             recognizer.RecognizeAsync(RecognizeMode.Multiple);
             Log("音声呼びかけ検出を開始しました。");
         }
         catch (Exception ex) { Log("音声認識を開始できません: " + ex.Message); StopRecognition(); }
     }
-    private void SwitchToWakeMode()
-    {
-        if (recognizer == null || !dictationMode) return;
-        try { switchBackToWake = true; recognizer.RequestRecognizerUpdate(); }
-        catch (Exception ex) { Log("音声認識切替エラー: " + ex.Message); }
-    }
     private void StopRecognition()
     {
         if (recognizer == null) return;
         try { recognizer.RecognizeAsyncCancel(); recognizer.Dispose(); } catch { }
         recognizer = null;
-        dictationMode = false; switchBackToWake = false;
-        wakeGrammar = null; freeGrammar = null;
     }
     private static bool GetStartup()
     {
@@ -223,8 +157,6 @@ public sealed class JarvisForm : Form
         Log("あなた: " + input);
         try
         {
-            if (TryHandleMediaCommand(input)) return;
-            if (TryExtractCloseTarget(input, out var closeTarget)) { CloseApplication(closeTarget); return; }
             if (input.Contains("おやすみ")) { awake = false; Say("承知しました。またいつでもお呼びください。"); return; }
             // PC操作はAIへ渡す前にローカルで判定。曖昧なアプリ名は確認する。
             if (TryExtractLaunchTarget(input, out var target))
@@ -246,76 +178,6 @@ public sealed class JarvisForm : Form
         catch (Exception ex) { Log("エラー: " + ex.Message); Say("処理に失敗しました。ログをご確認ください。"); }
         finally { busy = false; }
     }
-
-    private static bool TryExtractCloseTarget(string input, out string target)
-    {
-        target = "";
-        var text = input.Trim().TrimEnd('。', '！', '!', '？', '?');
-        foreach (var prefix in new[] { "ジャービス、", "ジャービス ", "ジャービス", "じゃーびす、", "じゃーびす" })
-            if (text.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) { text = text[prefix.Length..].Trim(); break; }
-        foreach (var suffix in new[] { "を閉じてください", "を終了してください", "を閉じて", "を終了して", "を閉じる", "を終了", "閉じて", "終了して" })
-        {
-            if (!text.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)) continue;
-            target = text[..^suffix.Length].Trim().TrimEnd('を').Trim();
-            return target.Length is > 0 and <= 80;
-        }
-        return false;
-    }
-
-    private void CloseApplication(string target)
-    {
-        var aliases = new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["メモ帳"]="notepad", ["エクスプローラー"]="explorer", ["エクスプローラ"]="explorer",
-            ["ディスコード"]="Discord", ["discord"]="Discord", ["スポティファイ"]="Spotify", ["spotify"]="Spotify",
-            ["電卓"]="CalculatorApp", ["クローム"]="chrome", ["chrome"]="chrome", ["obs"]="obs64",
-            ["スチーム"]="steam", ["steam"]="steam"
-        };
-        var normalized = NormalizeAppName(target);
-        var processName = aliases.FirstOrDefault(x=>NormalizeAppName(x.Key)==normalized).Value ?? target;
-        // プロセス名の完全一致のみ。OS重要プロセスやJARVIS自身は終了しない。
-        var protectedNames = new[] { "jarvis", "system", "winlogon", "csrss", "services", "lsass", "svchost", "dwm", "registry" };
-        if (protectedNames.Contains(processName, StringComparer.OrdinalIgnoreCase)) { Say("そのプロセスは安全のため終了できません。"); return; }
-        var matches = Process.GetProcessesByName(processName).Where(p => p.MainWindowHandle != IntPtr.Zero).ToList();
-        if (matches.Count == 0) { Say($"{target}の開いているウィンドウが見つかりません。"); return; }
-        if (matches.Count > 1) { Say($"{target}のウィンドウが複数あるため、誤操作を防ぐために終了しませんでした。"); return; }
-        var process = matches[0];
-        if (MessageBox.Show($"{process.ProcessName} のウィンドウを閉じますか？\n未保存の内容がある場合はアプリ側で確認してください。", "JARVIS 終了確認", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
-        if (process.CloseMainWindow()) Say($"{target}に終了を依頼しました。");
-        else Say($"{target}を閉じられませんでした。");
-    }
-
-    private bool TryHandleMediaCommand(string input)
-    {
-        var text = NormalizeAppName(input);
-        var isDiscord = text.Contains("discord") || text.Contains("ディスコード");
-        var isSpotify = text.Contains("spotify") || text.Contains("スポティファイ");
-        if (isDiscord && (text.Contains("画面共有") || text.Contains("スクリーン共有")))
-        {
-            Say("Discordの画面共有は、共有する画面と相手を確認してから手動で開始してください。自動共有はまだ対応していません。");
-            return true;
-        }
-        if (isDiscord && (text.Contains("ミュート") || text.Contains("デフン") || text.Contains("スピーカー")))
-        {
-            var processes = Process.GetProcessesByName("Discord").Where(p=>p.MainWindowHandle!=IntPtr.Zero).ToList();
-            if (processes.Count == 0) { Say("Discordのウィンドウが見つかりません。"); return true; }
-            var target = processes.FirstOrDefault(p=>p.MainWindowHandle==GetForegroundWindow());
-            if (target == null) { Say("誤操作を防ぐため、Discordを前面にしてからもう一度指示してください。"); return true; }
-            // Discord標準ショートカット。ユーザー側で変更している場合は一致しない。
-            if (text.Contains("スピーカー") || text.Contains("デフン") || text.Contains("聞こえなく"))
-            { Hotkey(0x11,0x10,0x44); Say("Discordのスピーカーミュート切り替えキーを送りました。"); }
-            else { Hotkey(0x11,0x10,0x4D); Say("Discordのマイクミュート切り替えキーを送りました。"); }
-            return true;
-        }
-        if (isSpotify && (text.Contains("再生") || text.Contains("流して") || text.Contains("かけて") || text.Contains("止め") || text.Contains("停止") || text.Contains("一時停止")))
-        {
-            if (text.Contains("停止") && !text.Contains("一時停止")) { Hotkey(0xB2); Say("メディア停止キーを送りました。"); }
-            else { Hotkey(0xB3); Say("メディアの再生・一時停止キーを送りました。"); }
-            return true;
-        }
-        return false;
-    }
-
     private static bool TryExtractLaunchTarget(string input, out string target)
     {
         target = "";
