@@ -371,6 +371,11 @@ public sealed class JarvisForm : Form
     private async Task LaunchApplicationAsync(string target)
     {
         var normalized = NormalizeAppName(target);
+        if (normalized is "フォートナイト" or "fortnite" or "フォトナ")
+        {
+            await LaunchFortniteAsync();
+            return;
+        }
         // 起動先を固定したWindows標準アプリ。AI生成コマンドや任意のシェル文字列は実行しない。
         var builtins = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -410,6 +415,39 @@ public sealed class JarvisForm : Form
         if (result != DialogResult.Yes) { Say("起動をキャンセルしました。"); return; }
         Process.Start(new ProcessStartInfo(app.Path) { UseShellExecute = true });
         Say($"{app.Name}を起動しました。");
+    }
+
+    private async Task LaunchFortniteAsync()
+    {
+        // Never launch arbitrary executables or AI-generated shell commands.
+        if (IsGaming()) { Say("フォートナイトはすでに起動しています。"); return; }
+        var apps = await Task.Run(FindInstalledApps);
+        var shortcuts = apps.Where(x => NormalizeAppName(x.Name) == "fortnite").ToList();
+        if (shortcuts.Count == 1)
+        {
+            Process.Start(new ProcessStartInfo(shortcuts[0].Path) { UseShellExecute = true });
+            Say("フォートナイトの起動を指示しました。");
+            return;
+        }
+        if (shortcuts.Count > 1)
+        {
+            Say("フォートナイトのショートカットが複数見つかりました。1つに整理してからお試しください。");
+            return;
+        }
+
+        // Epic Games Launcher registers this URI scheme on supported installations.
+        // Check registration before invoking the fixed, allowlisted Fortnite URI.
+        using var epicProtocol = Registry.ClassesRoot.OpenSubKey("com.epicgames.launcher");
+        if (epicProtocol?.GetValue("URL Protocol") != null)
+        {
+            Process.Start(new ProcessStartInfo("com.epicgames.launcher://apps/Fortnite?action=launch&silent=true")
+            {
+                UseShellExecute = true
+            });
+            Say("Epic Games Launcherにフォートナイトの起動を指示しました。");
+            return;
+        }
+        Say("フォートナイトのショートカットまたはEpic Games Launcherが見つかりません。デスクトップにフォートナイトのショートカットを作成してください。");
     }
 
     private async Task AnalyzeScreenAsync()
