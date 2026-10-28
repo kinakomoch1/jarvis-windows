@@ -406,6 +406,11 @@ public sealed class JarvisForm : Form
     private async Task LaunchApplicationAsync(string target)
     {
         var normalized = NormalizeAppName(target);
+        if (normalized is "spotify" or "スポティファイ" or "スポティファイー")
+        {
+            await LaunchSpotifyAsync();
+            return;
+        }
         if (normalized is "フォートナイト" or "fortnite" or "フォトナ")
         {
             await LaunchFortniteAsync();
@@ -452,6 +457,60 @@ public sealed class JarvisForm : Form
         if (result != DialogResult.Yes) { Say("起動をキャンセルしました。"); return; }
         Process.Start(new ProcessStartInfo(app.Path) { UseShellExecute = true });
         Say($"{app.Name}を起動しました。");
+    }
+
+    private async Task LaunchSpotifyAsync()
+    {
+        try
+        {
+            if (Process.GetProcessesByName("Spotify").Any())
+            {
+                Say("Spotifyはすでに起動しています。");
+                return;
+            }
+
+            // Prefer an installed shortcut, which handles classic and Store installations.
+            var apps = await Task.Run(FindInstalledApps);
+            var shortcuts = apps.Where(x => NormalizeAppName(x.Name) == "spotify").ToList();
+            if (shortcuts.Count == 1)
+            {
+                Process.Start(new ProcessStartInfo(shortcuts[0].Path) { UseShellExecute = true });
+                Say("Spotifyの起動を指示しました。");
+                return;
+            }
+            if (shortcuts.Count > 1)
+            {
+                Say("Spotifyのショートカットが複数見つかりました。スタートメニューを確認してください。");
+                return;
+            }
+
+            // Spotify's registered URI handler can launch either the desktop or Store app.
+            using (var spotifyProtocol = Registry.ClassesRoot.OpenSubKey("spotify"))
+            {
+                if (spotifyProtocol?.GetValue("URL Protocol") != null)
+                {
+                    Process.Start(new ProcessStartInfo("spotify:") { UseShellExecute = true });
+                    Say("Spotifyの起動を指示しました。");
+                    return;
+                }
+            }
+
+            // Traditional per-user desktop installation.
+            var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            var executable = Path.Combine(local, "Spotify", "Spotify.exe");
+            if (File.Exists(executable))
+            {
+                Process.Start(new ProcessStartInfo(executable) { UseShellExecute = true });
+                Say("Spotifyの起動を指示しました。");
+                return;
+            }
+            Say("Spotifyの起動先が見つかりませんでした。Spotifyを一度手動で開いてからお試しください。");
+        }
+        catch (Exception ex)
+        {
+            Log("Spotify起動エラー: " + ex.Message);
+            Say("Spotifyを起動できませんでした。ログをご確認ください。");
+        }
     }
 
     private async Task LaunchFortniteAsync()
