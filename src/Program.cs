@@ -173,6 +173,9 @@ public sealed class JarvisForm : Form
                 "Google Chromeを開いて", "Chromeを開いて",
                 "Spotifyを開いて", "Spotifyを起動して",
                 "スポティファイを開いて", "スポティファイを起動して",
+                "TikTokを開いて", "ティックトックを開いて", "ティックトックを起動して",
+                "Xを開いて", "エックスを開いて", "ツイッターを開いて",
+                "VyLiteを開いて", "VyLiteを起動して", "ブイライトを開いて", "ブイライトを起動して",
                 "ディスコードを起動して", "ディスコードを開いて",
                 "メモ帳を起動して", "メモ帳を開いて",
                 "ブラウザを起動して", "ブラウザを開いて",
@@ -406,6 +409,23 @@ public sealed class JarvisForm : Form
     private async Task LaunchApplicationAsync(string target)
     {
         var normalized = NormalizeAppName(target);
+        if (normalized is "tiktok" or "ティックトック" or "ティクトック")
+        {
+            Process.Start(new ProcessStartInfo("https://www.tiktok.com/") { UseShellExecute = true });
+            Say("TikTokをブラウザで開くよう指示しました。");
+            return;
+        }
+        if (normalized is "x" or "エックス" or "ツイッター" or "twitter")
+        {
+            Process.Start(new ProcessStartInfo("https://x.com/") { UseShellExecute = true });
+            Say("Xをブラウザで開くよう指示しました。");
+            return;
+        }
+        if (normalized is "vylite" or "ブイライト" or "ヴァイライト" or "ヴィライト")
+        {
+            await LaunchVyLiteAsync();
+            return;
+        }
         if (normalized is "spotify" or "スポティファイ" or "スポティファイー")
         {
             await LaunchSpotifyAsync();
@@ -457,6 +477,30 @@ public sealed class JarvisForm : Form
         if (result != DialogResult.Yes) { Say("起動をキャンセルしました。"); return; }
         Process.Start(new ProcessStartInfo(app.Path) { UseShellExecute = true });
         Say($"{app.Name}を起動しました。");
+    }
+
+    private async Task LaunchVyLiteAsync()
+    {
+        // VyLite is a privileged optimizer: only start a shortcut explicitly installed by the user.
+        // Never run a downloaded installer or search arbitrary executable paths.
+        var apps = await Task.Run(FindInstalledApps);
+        var matches = apps.Where(x => NormalizeAppName(x.Name) == "vylite").ToList();
+        if (matches.Count == 0)
+        {
+            Say("VyLiteのショートカットが見つかりません。スタートメニューにVyLiteのショートカットを追加してください。");
+            return;
+        }
+        if (matches.Count > 1)
+        {
+            Say("VyLiteのショートカットが複数あります。整理してからお試しください。");
+            return;
+        }
+        var result = MessageBox.Show(
+            $"VyLiteを起動しますか？\\n{matches[0].Path}\\n起動時に管理者権限の確認が表示される場合があります。",
+            "JARVIS VyLite起動確認", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+        if (result != DialogResult.Yes) { Say("起動をキャンセルしました。"); return; }
+        Process.Start(new ProcessStartInfo(matches[0].Path) { UseShellExecute = true });
+        Say("VyLiteの起動を指示しました。");
     }
 
     private async Task LaunchSpotifyAsync()
