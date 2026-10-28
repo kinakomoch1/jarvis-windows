@@ -144,7 +144,7 @@ public sealed class JarvisForm : Form
                         {
                             awake = true;
                             wakeUntil = DateTime.Now.AddSeconds(20);
-                            Say("はい、何でしょうか？");
+                            Say("はい、どうぞ。");
                             try
                             {
                                 recognizer?.RequestRecognizerUpdate();
