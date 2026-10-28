@@ -39,6 +39,7 @@ public sealed class JarvisForm : Form
     private readonly NotifyIcon tray;
     private readonly SpeechSynthesizer speaker = new();
     private SpeechRecognitionEngine? recognizer;
+    private Grammar? wakeGrammar;
     private Grammar? commandGrammar;
     private Grammar? dictationGrammar;
     private bool awake = false;
@@ -100,7 +101,7 @@ public sealed class JarvisForm : Form
         listening.CheckedChanged += (_, _) => { if (listening.Checked) StartRecognition(); else StopRecognition(); };
         proactive.CheckedChanged += (_, _) => { if (proactive.Checked) { CheckHealth(); healthTimer.Start(); } else healthTimer.Stop(); };
         healthTimer.Tick += (_, _) => CheckHealth();
-        voiceWindow.Tick += (_, _) => { awake = false; voiceWindow.Stop(); if (commandGrammar != null) commandGrammar.Enabled = false; if (dictationGrammar != null) dictationGrammar.Enabled = false; Log("音声指示の受付を終了しました。"); };
+        voiceWindow.Tick += (_, _) => { awake = false; voiceWindow.Stop(); if (wakeGrammar != null) wakeGrammar.Enabled = true; if (commandGrammar != null) commandGrammar.Enabled = false; if (dictationGrammar != null) dictationGrammar.Enabled = false; Log("音声指示の受付を終了しました。"); };
         try { speaker.SetOutputToDefaultAudioDevice(); SelectVoice(); } catch (Exception ex) { Log("音声合成を初期化できません: " + ex.Message); }
         Shown += (_, _) => { Log("起動しました。『ジャービス』と呼びかけるか、文字を入力してください。"); StartRecognition(); if (proactive.Checked) { CheckHealth(); healthTimer.Start(); } };
     }
@@ -161,12 +162,17 @@ public sealed class JarvisForm : Form
 
             recognizer = new SpeechRecognitionEngine(info);
             var wake = new Choices("ジャービス", "じゃーびす", "ジャービス起動");
-            recognizer.LoadGrammar(new Grammar(new GrammarBuilder(wake) { Culture = info.Culture }) { Name = "Wake" });
+            wakeGrammar = new Grammar(new GrammarBuilder(wake) { Culture = info.Culture }) { Name = "Wake" };
+            recognizer.LoadGrammar(wakeGrammar);
 
             // A fixed grammar makes essential local actions more reliable than dictation alone.
             var commands = new Choices(
                 "フォートナイトを起動して", "フォートナイトを開いて",
                 "フォートナイト起動", "フォートナイト開いて",
+                "グーグルクロームを開いて", "グーグルクロームを起動して",
+                "Google Chromeを開いて", "Chromeを開いて",
+                "Spotifyを開いて", "Spotifyを起動して",
+                "スポティファイを開いて", "スポティファイを起動して",
                 "ディスコードを起動して", "ディスコードを開いて",
                 "メモ帳を起動して", "メモ帳を開いて",
                 "ブラウザを起動して", "ブラウザを開いて",
@@ -189,7 +195,9 @@ public sealed class JarvisForm : Form
                     Log("音声認識: " + heard);
                     if (isWake)
                     {
+                        if (awake) return;
                         awake = true;
+                        if (wakeGrammar != null) wakeGrammar.Enabled = false;
                         voiceWindow.Stop();
                         voiceWindow.Start();
                         if (commandGrammar != null) commandGrammar.Enabled = true;
@@ -197,9 +205,12 @@ public sealed class JarvisForm : Form
                         Say("はい、何でしょうか？");
                         return;
                     }
-                    if (!awake || speaker.State == SynthesizerState.Speaking) return;
+                    if (!awake) return;
+                    // The speech synthesizer may still report Speaking briefly after playback.
+                    // Only act on recognized commands; do not drop them based on TTS state.
                     awake = false;
                     voiceWindow.Stop();
+                    if (wakeGrammar != null) wakeGrammar.Enabled = true;
                     if (commandGrammar != null) commandGrammar.Enabled = false;
                     if (dictationGrammar != null) dictationGrammar.Enabled = false;
                     await HandleCommandAsync(heard);
@@ -217,6 +228,7 @@ public sealed class JarvisForm : Form
         if (recognizer == null) return;
         try { recognizer.RecognizeAsyncCancel(); recognizer.Dispose(); } catch { }
         recognizer = null;
+        wakeGrammar = null;
         commandGrammar = null;
         dictationGrammar = null;
     }
@@ -410,7 +422,9 @@ public sealed class JarvisForm : Form
             ["タスクマネージャー"] = "taskmgr.exe", ["タスクマネージャ"] = "taskmgr.exe",
             ["コントロールパネル"] = "control.exe", ["設定"] = "ms-settings:",
             ["ブラウザ"] = "https://www.google.com", ["ブラウザー"] = "https://www.google.com", ["ウェブ"] = "https://www.google.com",
-            ["discord"] = "discord://", ["ディスコード"] = "discord://"
+            ["discord"] = "discord://", ["ディスコード"] = "discord://",
+            ["googlechrome"] = "https://www.google.com", ["グーグルクローム"] = "https://www.google.com",
+            ["chrome"] = "https://www.google.com"
         };
         var builtin = builtins.FirstOrDefault(x => NormalizeAppName(x.Key) == normalized);
         if (builtin.Key != null)
