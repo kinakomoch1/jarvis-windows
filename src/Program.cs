@@ -32,6 +32,10 @@ public sealed class JarvisForm : Form
     private readonly Button screenButton = new() { Text = "画面をAIに見せる", Width = 155, Height = 30, BackColor = Color.FromArgb(0, 105, 140), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
     private readonly CheckBox startup = new() { Text = "Windowsと同時に起動", AutoSize = true, ForeColor = Color.White };
     private readonly CheckBox listening = new() { Text = "呼びかけを検出", Checked = true, AutoSize = true, ForeColor = Color.White };
+    private readonly CheckBox proactive = new() { Text = "PCを自動監視", Checked = true, AutoSize = true, ForeColor = Color.White };
+    private readonly System.Windows.Forms.Timer healthTimer = new() { Interval = 60000 };
+    private DateTime lastMemoryAlert = DateTime.MinValue;
+    private bool memoryWarningActive;
     private readonly NotifyIcon tray;
     private readonly SpeechSynthesizer speaker = new();
     private SpeechRecognitionEngine? recognizer;
@@ -63,6 +67,7 @@ public sealed class JarvisForm : Form
         top.Controls.Add(apiKey);
         top.Controls.Add(startup);
         top.Controls.Add(listening);
+        top.Controls.Add(proactive);
         top.Controls.Add(screenButton);
         screenButton.Click += async (_, _) => await AnalyzeScreenAsync();
         Controls.Add(top);
@@ -91,9 +96,41 @@ public sealed class JarvisForm : Form
         startup.Checked = GetStartup();
         startup.CheckedChanged += (_, _) => SetStartup(startup.Checked);
         listening.CheckedChanged += (_, _) => { if (listening.Checked) StartRecognition(); else StopRecognition(); };
+        proactive.CheckedChanged += (_, _) => { if (proactive.Checked) { CheckHealth(); healthTimer.Start(); } else healthTimer.Stop(); };
+        healthTimer.Tick += (_, _) => CheckHealth();
         voiceWindow.Tick += (_, _) => { awake = false; voiceWindow.Stop(); Log("音声指示の受付を終了しました。"); };
         try { speaker.SetOutputToDefaultAudioDevice(); SelectVoice(); } catch (Exception ex) { Log("音声合成を初期化できません: " + ex.Message); }
-        Shown += (_, _) => { Log("起動しました。『ジャービス』と呼びかけるか、文字を入力してください。"); StartRecognition(); };
+        Shown += (_, _) => { Log("起動しました。『ジャービス』と呼びかけるか、文字を入力してください。"); StartRecognition(); if (proactive.Checked) { CheckHealth(); healthTimer.Start(); } };
+    }
+
+    private static bool IsGaming()
+    {
+        // Avoid interrupting Fortnite; additional games can be added here.
+        try { return Process.GetProcessesByName("FortniteClient-Win64-Shipping").Length > 0; }
+        catch { return false; }
+    }
+
+    private void CheckHealth()
+    {
+        try
+        {
+            var m = PcHealth.ReadMemory();
+            if (m.Percent < 75) { memoryWarningActive = false; return; }
+            if (m.Percent < 85 || (memoryWarningActive && DateTime.UtcNow - lastMemoryAlert < TimeSpan.FromHours(1))) return;
+            memoryWarningActive = true;
+            lastMemoryAlert = DateTime.UtcNow;
+            var message = $"PCのメモリ使用率が{m.Percent}パーセントです。不要なアプリやタブの整理をおすすめします。";
+            Log("自動監視: " + message);
+            if (IsGaming())
+            {
+                // No speech or focus-stealing windows during Fortnite.
+                tray.BalloonTipTitle = "JARVIS PC監視";
+                tray.BalloonTipText = message;
+                tray.ShowBalloonTip(4000);
+            }
+            else Say(message);
+        }
+        catch (Exception ex) { Log("PC監視エラー: " + ex.Message); healthTimer.Stop(); }
     }
 
     private void ShowWindow() { Show(); WindowState = FormWindowState.Normal; Activate(); }
@@ -192,9 +229,8 @@ public sealed class JarvisForm : Form
             }
             if (input.Contains("状態") || input.Contains("メモリ"))
             {
-                var info = GC.GetGCMemoryInfo();
-                var total = info.TotalAvailableMemoryBytes / 1024 / 1024;
-                Say($"JARVISの実行環境で利用可能なメモリの目安は {total} メガバイトです。PC全体の診断機能は今後追加します。"); return;
+                var m = PcHealth.ReadMemory();
+                Say($"PCのメモリ使用率は{m.Percent}パーセントです。{m.TotalGiB}ギガバイト中、{m.UsedGiB}ギガバイトを使用しています。"); return;
             }
             if (provider.SelectedIndex == 2) { Say("現在はローカルモードです。AIとの会話にはプロバイダーを選択してAPIキーを入力してください。"); return; }
             if (provider.SelectedIndex != 3 && string.IsNullOrWhiteSpace(apiKey.Text)) { Say("APIキーを入力してください。"); return; }
@@ -503,7 +539,7 @@ public sealed class JarvisForm : Form
     }
     protected override void Dispose(bool disposing)
     {
-        if (disposing) { StopRecognition(); tray.Visible = false; tray.Dispose(); speaker.Dispose(); http.Dispose(); }
+        if (disposing) { healthTimer.Stop(); healthTimer.Dispose(); voiceWindow.Dispose(); StopRecognition(); tray.Visible = false; tray.Dispose(); speaker.Dispose(); http.Dispose(); }
         base.Dispose(disposing);
     }
 }
