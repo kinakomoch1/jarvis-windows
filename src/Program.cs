@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.Globalization;
@@ -37,6 +38,10 @@ public sealed class JarvisForm : Form
     private bool awake = false;
     private bool busy = false;
     private bool exiting = false;
+    private readonly System.Windows.Forms.Timer voiceWindow = new() { Interval = 20000 };
+    [DllImport("user32.dll")] private static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+    private static void KeyTap(byte vk) { keybd_event(vk, 0, 0, UIntPtr.Zero); keybd_event(vk, 0, 2, UIntPtr.Zero); }
+    private static void Hotkey(byte last) { keybd_event(0x11, 0, 0, UIntPtr.Zero); keybd_event(0x10, 0, 0, UIntPtr.Zero); KeyTap(last); keybd_event(0x10, 0, 2, UIntPtr.Zero); keybd_event(0x11, 0, 2, UIntPtr.Zero); }
     private readonly HttpClient http = new() { Timeout = TimeSpan.FromMinutes(5) };
     private readonly List<(string Role, string Content)> history = new();
 
@@ -86,6 +91,7 @@ public sealed class JarvisForm : Form
         startup.Checked = GetStartup();
         startup.CheckedChanged += (_, _) => SetStartup(startup.Checked);
         listening.CheckedChanged += (_, _) => { if (listening.Checked) StartRecognition(); else StopRecognition(); };
+        voiceWindow.Tick += (_, _) => { awake = false; voiceWindow.Stop(); Log("音声指示の受付を終了しました。"); };
         try { speaker.SetOutputToDefaultAudioDevice(); SelectVoice(); } catch (Exception ex) { Log("音声合成を初期化できません: " + ex.Message); }
         Shown += (_, _) => { Log("起動しました。『ジャービス』と呼びかけるか、文字を入力してください。"); StartRecognition(); };
     }
@@ -111,28 +117,45 @@ public sealed class JarvisForm : Form
         try
         {
             var info = SpeechRecognitionEngine.InstalledRecognizers().FirstOrDefault(r => r.Culture.Name.StartsWith("ja", StringComparison.OrdinalIgnoreCase));
-            if (info == null) { Log("日本語のWindows音声認識エンジンが見つかりません。文字入力は使用できます。"); return; }
+            if (info == null) { Log("日本語のWindows音声認識エンジンが見つかりません。"); return; }
             recognizer = new SpeechRecognitionEngine(info);
-            var choices = new Choices("ジャービス", "じゃーびす", "ジャービス起動", "おやすみ", "ディスコードを開いて", "メモ帳を開いて", "ブラウザを開いて", "エクスプローラーを開いて", "電卓を開いて", "PCの状態を教えて");
-            recognizer.LoadGrammar(new Grammar(new GrammarBuilder(choices) { Culture = info.Culture }));
+            var wake = new Choices("ジャービス", "じゃーびす", "ジャービス起動");
+            recognizer.LoadGrammar(new Grammar(new GrammarBuilder(wake) { Culture = info.Culture }) { Name = "Wake" });
+            // Wake and dictation grammars coexist; commands are only acted on after wake.
+            recognizer.LoadGrammar(new DictationGrammar { Name = "FreeSpeech" });
             recognizer.SetInputToDefaultAudioDevice();
             recognizer.SpeechRecognized += (_, e) =>
             {
-                if (e.Result.Confidence < 0.65) return;
-                var heard = e.Result.Text;
+                var heard = e.Result.Text.Trim();
+                var isWake = heard.Contains("ジャービス") || heard.Contains("じゃーびす");
+                if (e.Result.Confidence < (isWake ? 0.68 : 0.55)) return;
                 BeginInvoke(async () =>
                 {
-                    if (heard.Contains("ジャービス") || heard.Contains("じゃーびす")) { awake = true; Say("はい、何でしょうか？ 画面に指示を入力するか、対応する音声コマンドをお話しください。"); }
-                    else if (awake) { await HandleCommandAsync(heard); }
+                    if (speaker.State == SynthesizerState.Speaking || busy) return;
+                    Log("音声認識: " + heard);
+                    if (isWake)
+                    {
+                        awake = true;
+                        voiceWindow.Stop();
+                        voiceWindow.Start();
+                        Say("はい、何でしょうか？");
+                        return;
+                    }
+                    if (!awake) return;
+                    awake = false;
+                    voiceWindow.Stop();
+                    await HandleCommandAsync(heard);
                 });
             };
             recognizer.RecognizeAsync(RecognizeMode.Multiple);
-            Log("音声呼びかけ検出を開始しました。");
+            Log("音声認識を開始しました。呼びかけ後20秒間、自由な指示を受け付けます。");
         }
         catch (Exception ex) { Log("音声認識を開始できません: " + ex.Message); StopRecognition(); }
     }
     private void StopRecognition()
     {
+        voiceWindow.Stop();
+        awake = false;
         if (recognizer == null) return;
         try { recognizer.RecognizeAsyncCancel(); recognizer.Dispose(); } catch { }
         recognizer = null;
@@ -158,6 +181,9 @@ public sealed class JarvisForm : Form
         try
         {
             if (input.Contains("おやすみ")) { awake = false; Say("承知しました。またいつでもお呼びください。"); return; }
+            // 音声とテキストは同じコマンドルーターを通す。
+            if (TryHandleDiscordOrSpotify(input)) return;
+            if (TryExtractCloseTarget(input, out var closeTarget)) { CloseApplication(closeTarget); return; }
             // PC操作はAIへ渡す前にローカルで判定。曖昧なアプリ名は確認する。
             if (TryExtractLaunchTarget(input, out var target))
             {
@@ -178,6 +204,81 @@ public sealed class JarvisForm : Form
         catch (Exception ex) { Log("エラー: " + ex.Message); Say("処理に失敗しました。ログをご確認ください。"); }
         finally { busy = false; }
     }
+    private static string CleanCommand(string input)
+    {
+        var text = input.Trim().TrimEnd('。', '！', '!', '？', '?');
+        foreach (var prefix in new[] { "ジャービス、", "ジャービス ", "ジャービス", "じゃーびす、", "じゃーびす" })
+            if (text.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) { text = text[prefix.Length..].Trim(); break; }
+        return text;
+    }
+
+    private static bool TryExtractCloseTarget(string input, out string target)
+    {
+        target = "";
+        var text = CleanCommand(input);
+        foreach (var suffix in new[] { "を閉じてください", "を終了してください", "を閉じて", "を終了して", "を閉じる", "を終了", "閉じて", "終了して" })
+        {
+            if (!text.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)) continue;
+            target = text[..^suffix.Length].Trim().TrimEnd('を').Trim();
+            return target.Length > 0 && target.Length <= 80;
+        }
+        return false;
+    }
+
+    private void CloseApplication(string target)
+    {
+        var aliases = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["ディスコード"] = "Discord", ["discord"] = "Discord",
+            ["スポティファイ"] = "Spotify", ["spotify"] = "Spotify",
+            ["メモ帳"] = "notepad", ["電卓"] = "CalculatorApp",
+            ["クローム"] = "chrome", ["chrome"] = "chrome",
+            ["ブラウザ"] = "chrome", ["ブラウザー"] = "chrome",
+            ["obs"] = "obs64", ["スチーム"] = "steam", ["steam"] = "steam"
+        };
+        var key = NormalizeAppName(target);
+        var name = aliases.FirstOrDefault(x => NormalizeAppName(x.Key) == key).Value ?? target;
+        var protectedNames = new[] { "jarvis", "system", "winlogon", "csrss", "services", "lsass", "svchost", "dwm", "registry", "explorer" };
+        if (protectedNames.Contains(name, StringComparer.OrdinalIgnoreCase)) { Say("そのアプリは安全のため終了できません。"); return; }
+        var processes = Process.GetProcessesByName(name).Where(p => p.MainWindowHandle != IntPtr.Zero).ToList();
+        if (processes.Count != 1)
+        {
+            Say(processes.Count == 0 ? target + "のウィンドウが見つかりません。" : "同じ名前のウィンドウが複数あります。終了しませんでした。");
+            return;
+        }
+        var process = processes[0];
+        if (MessageBox.Show(target + "を閉じますか？ 未保存の作業に注意してください。", "JARVIS 終了確認", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+        Say(process.CloseMainWindow() ? target + "に終了を依頼しました。" : target + "を閉じられませんでした。");
+    }
+
+    private bool TryHandleDiscordOrSpotify(string input)
+    {
+        var text = NormalizeAppName(CleanCommand(input));
+        var discord = text.Contains("discord") || text.Contains("ディスコード");
+        var spotify = text.Contains("spotify") || text.Contains("スポティファイ");
+        if (discord && (text.Contains("画面共有") || text.Contains("スクリーン共有")))
+        {
+            Say("画面共有する相手と画面をDiscordで確認して、手動で開始してください。");
+            return true;
+        }
+        if (discord && (text.Contains("ミュート") || text.Contains("デフン")))
+        {
+            if (!Process.GetProcessesByName("Discord").Any()) { Say("Discordが起動していません。"); return true; }
+            var deafen = text.Contains("スピーカー") || text.Contains("聞こえ") || text.Contains("デフン");
+            Hotkey(deafen ? (byte)0x44 : (byte)0x4D);
+            Say(deafen ? "Discordのスピーカーミュート切り替えを送信しました。" : "Discordのマイクミュート切り替えを送信しました。");
+            return true;
+        }
+        if (spotify && (text.Contains("再生") || text.Contains("流して") || text.Contains("かけて") || text.Contains("止め") || text.Contains("一時停止")))
+        {
+            if (!Process.GetProcessesByName("Spotify").Any()) { Say("Spotifyが起動していません。"); return true; }
+            KeyTap(0xB3); // VK_MEDIA_PLAY_PAUSE: toggle, not state-aware
+            Say("再生と一時停止の切り替えキーを送りました。現在の状態は確認できません。");
+            return true;
+        }
+        return false;
+    }
+
     private static bool TryExtractLaunchTarget(string input, out string target)
     {
         target = "";
@@ -244,7 +345,7 @@ public sealed class JarvisForm : Form
             ["ペイント"] = "mspaint.exe", ["paint"] = "mspaint.exe",
             ["タスクマネージャー"] = "taskmgr.exe", ["タスクマネージャ"] = "taskmgr.exe",
             ["コントロールパネル"] = "control.exe", ["設定"] = "ms-settings:",
-            ["ブラウザ"] = "https://www.google.com", ["ウェブ"] = "https://www.google.com",
+            ["ブラウザ"] = "https://www.google.com", ["ブラウザー"] = "https://www.google.com", ["ウェブ"] = "https://www.google.com",
             ["discord"] = "discord://", ["ディスコード"] = "discord://"
         };
         var builtin = builtins.FirstOrDefault(x => NormalizeAppName(x.Key) == normalized);
