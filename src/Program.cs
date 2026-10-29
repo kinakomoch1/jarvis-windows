@@ -40,6 +40,7 @@ public sealed class JarvisForm : Form
     private readonly SpeechSynthesizer speaker = new();
     private SpeechRecognitionEngine? recognizer;
     private Grammar? wakeGrammar;
+    private Grammar? appLaunchGrammar;
     private Grammar? commandGrammar;
     private Grammar? dictationGrammar;
     private bool awake = false;
@@ -101,7 +102,7 @@ public sealed class JarvisForm : Form
         listening.CheckedChanged += (_, _) => { if (listening.Checked) StartRecognition(); else StopRecognition(); };
         proactive.CheckedChanged += (_, _) => { if (proactive.Checked) { CheckHealth(); healthTimer.Start(); } else healthTimer.Stop(); };
         healthTimer.Tick += (_, _) => CheckHealth();
-        voiceWindow.Tick += (_, _) => { awake = false; voiceWindow.Stop(); if (wakeGrammar != null) wakeGrammar.Enabled = true; if (commandGrammar != null) commandGrammar.Enabled = false; if (dictationGrammar != null) dictationGrammar.Enabled = false; Log("音声指示の受付を終了しました。"); };
+        voiceWindow.Tick += (_, _) => { awake = false; voiceWindow.Stop(); if (wakeGrammar != null) wakeGrammar.Enabled = true; if (commandGrammar != null) commandGrammar.Enabled = false; if (appLaunchGrammar != null) appLaunchGrammar.Enabled = false; if (dictationGrammar != null) dictationGrammar.Enabled = false; Log("音声指示の受付を終了しました。"); };
         try { speaker.SetOutputToDefaultAudioDevice(); SelectVoice(); } catch (Exception ex) { Log("音声合成を初期化できません: " + ex.Message); }
         Shown += (_, _) => { Log("起動しました。『ジャービス』と呼びかけるか、文字を入力してください。"); StartRecognition(); if (proactive.Checked) { CheckHealth(); healthTimer.Start(); } };
     }
@@ -181,6 +182,24 @@ public sealed class JarvisForm : Form
                 "ブラウザを起動して", "ブラウザを開いて",
                 "電卓を起動して", "電卓を開いて",
                 "メモリの状態を教えて", "PCの状態を教えて");
+            // Combinatorial grammar: app names and verbs can be mixed without
+            // hardcoding every full phrase. Dictation remains available as fallback.
+            var appNames = new Choices(
+                "YouTube", "ユーチューブ", "Twitch", "ツイッチ",
+                "Google", "グーグル", "Gmail", "ジーメール",
+                "GitHub", "ギットハブ", "Instagram", "インスタ",
+                "Netflix", "ネットフリックス", "ABEMA", "アベマ",
+                "ニコニコ動画", "Amazon", "アマゾン",
+                "Wikipedia", "ウィキペディア", "ChatGPT", "チャットGPT",
+                "Canva", "キャンバ", "Googleマップ", "グーグルマップ",
+                "OBS", "Steam", "スチーム", "エクスプローラー",
+                "ペイント", "タスクマネージャー", "設定");
+            var verbs = new Choices("を開いて", "を起動して", "を開いてください", "を起動してください");
+            var combined = new GrammarBuilder { Culture = info.Culture };
+            combined.Append(appNames);
+            combined.Append(verbs);
+            appLaunchGrammar = new Grammar(combined) { Name = "AppLaunch", Enabled = false };
+            recognizer.LoadGrammar(appLaunchGrammar);
             commandGrammar = new Grammar(new GrammarBuilder(commands) { Culture = info.Culture }) { Name = "Commands", Enabled = false };
             recognizer.LoadGrammar(commandGrammar);
             dictationGrammar = new DictationGrammar { Name = "FreeSpeech", Enabled = false };
@@ -204,6 +223,7 @@ public sealed class JarvisForm : Form
                         voiceWindow.Stop();
                         voiceWindow.Start();
                         if (commandGrammar != null) commandGrammar.Enabled = true;
+                        if (appLaunchGrammar != null) appLaunchGrammar.Enabled = true;
                         if (dictationGrammar != null) dictationGrammar.Enabled = true;
                         Say("はい、何でしょうか？");
                         return;
@@ -232,6 +252,7 @@ public sealed class JarvisForm : Form
         try { recognizer.RecognizeAsyncCancel(); recognizer.Dispose(); } catch { }
         recognizer = null;
         wakeGrammar = null;
+        appLaunchGrammar = null;
         commandGrammar = null;
         dictationGrammar = null;
     }
@@ -409,6 +430,47 @@ public sealed class JarvisForm : Form
     private async Task LaunchApplicationAsync(string target)
     {
         var normalized = NormalizeAppName(target);
+        var websites = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["youtube"] = "https://www.youtube.com/",
+            ["ユーチューブ"] = "https://www.youtube.com/",
+            ["ようつべ"] = "https://www.youtube.com/",
+            ["twitch"] = "https://www.twitch.tv/",
+            ["ツイッチ"] = "https://www.twitch.tv/",
+            ["google"] = "https://www.google.com/",
+            ["グーグル"] = "https://www.google.com/",
+            ["gmail"] = "https://mail.google.com/",
+            ["ジーメール"] = "https://mail.google.com/",
+            ["github"] = "https://github.com/",
+            ["ギットハブ"] = "https://github.com/",
+            ["discordweb"] = "https://discord.com/app",
+            ["ディスコードウェブ"] = "https://discord.com/app",
+            ["instagram"] = "https://www.instagram.com/",
+            ["インスタグラム"] = "https://www.instagram.com/",
+            ["インスタ"] = "https://www.instagram.com/",
+            ["netflix"] = "https://www.netflix.com/",
+            ["ネットフリックス"] = "https://www.netflix.com/",
+            ["abema"] = "https://abema.tv/",
+            ["アベマ"] = "https://abema.tv/",
+            ["ニコニコ"] = "https://www.nicovideo.jp/",
+            ["ニコニコ動画"] = "https://www.nicovideo.jp/",
+            ["amazon"] = "https://www.amazon.co.jp/",
+            ["アマゾン"] = "https://www.amazon.co.jp/",
+            ["wikipedia"] = "https://ja.wikipedia.org/",
+            ["ウィキペディア"] = "https://ja.wikipedia.org/",
+            ["chatgpt"] = "https://chatgpt.com/",
+            ["チャットgpt"] = "https://chatgpt.com/",
+            ["canva"] = "https://www.canva.com/",
+            ["キャンバ"] = "https://www.canva.com/",
+            ["googleマップ"] = "https://www.google.com/maps",
+            ["グーグルマップ"] = "https://www.google.com/maps"
+        };
+        if (websites.TryGetValue(normalized, out var websiteUrl))
+        {
+            Process.Start(new ProcessStartInfo(websiteUrl) { UseShellExecute = true });
+            Say(target + "をブラウザで開くよう指示しました。");
+            return;
+        }
         if (normalized is "tiktok" or "ティックトック" or "ティクトック")
         {
             Process.Start(new ProcessStartInfo("https://www.tiktok.com/") { UseShellExecute = true });
