@@ -46,7 +46,30 @@ public sealed class JarvisForm : Form
     private bool awake = false;
     private bool busy = false;
     private bool exiting = false;
-    private readonly System.Windows.Forms.Timer voiceWindow = new() { Interval = 20000 };
+    private readonly System.Windows.Forms.Timer voiceWindow = new() { Interval = 120000 };
+    private const int VoiceHotkeyId = 0x4A41;
+    [DllImport("user32.dll", SetLastError = true)] private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint modifiers, uint key);
+    [DllImport("user32.dll")] private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        if (!RegisterHotKey(Handle, VoiceHotkeyId, 0x0003, (uint)Keys.J))
+            Log("Ctrl+Alt+Jの登録に失敗しました。他のアプリと競合している可能性があります。");
+    }
+    protected override void OnHandleDestroyed(EventArgs e)
+    {
+        UnregisterHotKey(Handle, VoiceHotkeyId);
+        base.OnHandleDestroyed(e);
+    }
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg == 0x0312 && m.WParam.ToInt32() == VoiceHotkeyId)
+        {
+            if (!listening.Checked) { listening.Checked = true; Say("呼びかけ検出をオンにしました。"); }
+            return;
+        }
+        base.WndProc(ref m);
+    }
     [DllImport("user32.dll")] private static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
     private static void KeyTap(byte vk) { keybd_event(vk, 0, 0, UIntPtr.Zero); keybd_event(vk, 0, 2, UIntPtr.Zero); }
     private static void Hotkey(byte last) { keybd_event(0x11, 0, 0, UIntPtr.Zero); keybd_event(0x10, 0, 0, UIntPtr.Zero); KeyTap(last); keybd_event(0x10, 0, 2, UIntPtr.Zero); keybd_event(0x11, 0, 2, UIntPtr.Zero); }
@@ -181,7 +204,9 @@ public sealed class JarvisForm : Form
                 "メモ帳を起動して", "メモ帳を開いて",
                 "ブラウザを起動して", "ブラウザを開いて",
                 "電卓を起動して", "電卓を開いて",
-                "メモリの状態を教えて", "PCの状態を教えて");
+                "メモリの状態を教えて", "PCの状態を教えて",
+                "呼びかけ検出をオフにして", "音声認識をオフにして",
+                "ファイルを開いて", "ファイルを起動して");
             // Combinatorial grammar: app names and verbs can be mixed without
             // hardcoding every full phrase. Dictation remains available as fallback.
             var appNames = new Choices(
@@ -193,7 +218,7 @@ public sealed class JarvisForm : Form
                 "Wikipedia", "ウィキペディア", "ChatGPT", "チャットGPT",
                 "Canva", "キャンバ", "Googleマップ", "グーグルマップ",
                 "OBS", "Steam", "スチーム", "エクスプローラー",
-                "ペイント", "タスクマネージャー", "設定");
+                "ペイント", "タスクマネージャー", "設定", "ファイル");
             var verbs = new Choices("を開いて", "を起動して", "を開いてください", "を起動してください");
             var combined = new GrammarBuilder { Culture = info.Culture };
             combined.Append(appNames);
@@ -231,16 +256,13 @@ public sealed class JarvisForm : Form
                     if (!awake) return;
                     // The speech synthesizer may still report Speaking briefly after playback.
                     // Only act on recognized commands; do not drop them based on TTS state.
-                    awake = false;
                     voiceWindow.Stop();
-                    if (wakeGrammar != null) wakeGrammar.Enabled = true;
-                    if (commandGrammar != null) commandGrammar.Enabled = false;
-                    if (dictationGrammar != null) dictationGrammar.Enabled = false;
+                    voiceWindow.Start();
                     await HandleCommandAsync(heard);
                 });
             };
             recognizer.RecognizeAsync(RecognizeMode.Multiple);
-            Log("音声認識を開始しました。『ジャービス』の後にアプリ名と『起動して』を話してください。");
+            Log("音声認識を開始しました。呼びかけ後は2分間連続して指示できます。Ctrl+Alt+Jで再開できます。");
         }
         catch (Exception ex) { Log("音声認識を開始できません: " + ex.Message); StopRecognition(); }
     }
@@ -276,6 +298,13 @@ public sealed class JarvisForm : Form
         Log("あなた: " + input);
         try
         {
+            if (input is "呼びかけ検出をオフにして" or "音声認識をオフにして" or "呼びかけをオフにして")
+            {
+                Log("音声認識を停止します。再開はCtrl+Alt+Jです。");
+                listening.Checked = false;
+                Say("呼びかけ検出をオフにしました。再開するにはコントロール、オルト、ジェイを押してください。");
+                return;
+            }
             if (input.Contains("おやすみ")) { awake = false; Say("承知しました。またいつでもお呼びください。"); return; }
             // 音声とテキストは同じコマンドルーターを通す。
             if (TryHandleDiscordOrSpotify(input)) return;
@@ -502,7 +531,7 @@ public sealed class JarvisForm : Form
         var builtins = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
             ["エクスプローラー"] = "explorer.exe", ["エクスプローラ"] = "explorer.exe",
-            ["ファイルエクスプローラー"] = "explorer.exe",
+            ["ファイルエクスプローラー"] = "explorer.exe", ["ファイル"] = "explorer.exe",
             ["メモ帳"] = "notepad.exe", ["notepad"] = "notepad.exe",
             ["電卓"] = "calc.exe", ["calculator"] = "calc.exe",
             ["ペイント"] = "mspaint.exe", ["paint"] = "mspaint.exe",
