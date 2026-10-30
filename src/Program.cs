@@ -75,6 +75,7 @@ public sealed class JarvisForm : Form
     private static void Hotkey(byte last) { keybd_event(0x11, 0, 0, UIntPtr.Zero); keybd_event(0x10, 0, 0, UIntPtr.Zero); KeyTap(last); keybd_event(0x10, 0, 2, UIntPtr.Zero); keybd_event(0x11, 0, 2, UIntPtr.Zero); }
     private readonly HttpClient http = new() { Timeout = TimeSpan.FromMinutes(5) };
     private RemoteControlServer? remote;
+    private CloudRemoteClient? cloudRemote;
     private readonly List<(string Role, string Content)> history = new();
 
     public JarvisForm()
@@ -99,6 +100,9 @@ public sealed class JarvisForm : Form
         var remoteButton = new Button { Text = "iPhone連携", Width = 110, Height = 30 };
         remoteButton.Click += (_, _) => ShowRemoteSetup();
         top.Controls.Add(remoteButton);
+        var cloudButton = new Button { Text = "クラウド連携", Width = 115, Height = 30 };
+        cloudButton.Click += (_, _) => ShowCloudSetup();
+        top.Controls.Add(cloudButton);
         top.Controls.Add(screenButton);
         screenButton.Click += async (_, _) => await AnalyzeScreenAsync();
         Controls.Add(top);
@@ -132,6 +136,38 @@ public sealed class JarvisForm : Form
         voiceWindow.Tick += (_, _) => { awake = false; voiceWindow.Stop(); if (wakeGrammar != null) wakeGrammar.Enabled = true; if (commandGrammar != null) commandGrammar.Enabled = false; if (appLaunchGrammar != null) appLaunchGrammar.Enabled = false; if (dictationGrammar != null) dictationGrammar.Enabled = false; Log("音声指示の受付を終了しました。"); };
         try { speaker.SetOutputToDefaultAudioDevice(); SelectVoice(); } catch (Exception ex) { Log("音声合成を初期化できません: " + ex.Message); }
         Shown += (_, _) => { StartRemote(); Log("起動しました。『ジャービス』と呼びかけるか、文字を入力してください。"); StartRecognition(); if (proactive.Checked) { CheckHealth(); healthTimer.Start(); } };
+    }
+
+    private void ShowCloudSetup()
+    {
+        using var dialog = new Form { Text = "JARVIS クラウド連携", Size = new Size(540, 250), StartPosition = FormStartPosition.CenterParent };
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), RowCount = 5, ColumnCount = 1 };
+        var url = new TextBox { Dock = DockStyle.Top, PlaceholderText = "https://jarvis-remote.***.workers.dev" };
+        var secret = new TextBox { Dock = DockStyle.Top, UseSystemPasswordChar = true, PlaceholderText = "Cloudflareに設定したアクセスキー" };
+        var connect = new Button { Text = "接続", Dock = DockStyle.Top };
+        var disconnect = new Button { Text = "切断", Dock = DockStyle.Top };
+        layout.Controls.Add(new Label { Text = "Cloudflare WorkerのHTTPS URL", AutoSize = true });
+        layout.Controls.Add(url);
+        layout.Controls.Add(secret);
+        layout.Controls.Add(connect);
+        layout.Controls.Add(disconnect);
+        dialog.Controls.Add(layout);
+        connect.Click += (_, _) =>
+        {
+            try
+            {
+                var next = new CloudRemoteClient(url.Text.Trim(), secret.Text, RemoteLaunchAsync,
+                    () => { var m = PcHealth.ReadMemory(); return $"メモリ {m.Percent}% / Fortnite {(IsGaming() ? "起動中" : "停止中")}"; }, Log);
+                cloudRemote?.Dispose();
+                cloudRemote = next;
+                next.Start();
+                Log("クラウド連携を開始しました。");
+                dialog.Close();
+            }
+            catch (Exception ex) { MessageBox.Show(ex.Message, "接続できません"); }
+        };
+        disconnect.Click += (_, _) => { cloudRemote?.Dispose(); cloudRemote = null; Log("クラウド連携を停止しました。"); dialog.Close(); };
+        dialog.ShowDialog(this);
     }
 
     private void StartRemote()
@@ -863,7 +899,7 @@ public sealed class JarvisForm : Form
     }
     protected override void Dispose(bool disposing)
     {
-        if (disposing) { remote?.Dispose(); healthTimer.Stop(); healthTimer.Dispose(); voiceWindow.Dispose(); StopRecognition(); tray.Visible = false; tray.Dispose(); speaker.Dispose(); http.Dispose(); }
+        if (disposing) { cloudRemote?.Dispose(); remote?.Dispose(); healthTimer.Stop(); healthTimer.Dispose(); voiceWindow.Dispose(); StopRecognition(); tray.Visible = false; tray.Dispose(); speaker.Dispose(); http.Dispose(); }
         base.Dispose(disposing);
     }
 }
