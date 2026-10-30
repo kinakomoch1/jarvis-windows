@@ -42,3 +42,20 @@ This is an **early functional build**, not a finished autonomous computer-use as
 - Requires Windows 10/11 x64. GitHub builds the .NET runtime into the published output.
 - API model identifiers and availability can change; update `src/Program.cs` if a provider retires a model.
 - The GitHub workflow is provided but has **not** been executed or validated on a Windows runner in this environment.
+
+
+## iPhoneからの遠隔操作（Ver.4.1 試験実装）
+
+JARVISを起動すると、PCの **127.0.0.1:18741** でローカル専用Web画面が起動します。
+JARVISの「iPhone連携」ボタンからアクセスキーを確認してください。キーは起動ごとに変わり、PC上でのみ表示されます。
+
+1. Windows PCとiPhoneに公式Tailscaleアプリを導入し、同じTailnetにサインインします。
+2. Windows PCのPowerShellで `tailscale serve --bg 18741` を実行します。Tailscaleが案内するHTTPS URLを確認します。
+3. iPhoneでTailscale接続を有効にして、そのHTTPS URLをSafariで開きます。
+4. JARVISのPC画面で表示されたアクセスキーを入力し、PC状態表示・Fortnite/Spotify/Discord起動を試します。
+
+**安全上の注意:** ルーターのポート開放やTailscale Funnelは使用しないでください。ServeはTailnet内だけに公開する用途です。PCは電源オンでJARVISが起動中である必要があります。アクセスキーは共有しないでください。画面を閉じるとキー入力は保持されません。リモート操作は許可された3アプリの起動と状態表示だけに限定しています。起動ボタンの応答は起動指示の受付を意味し、ゲームの起動完了を保証しません。
+
+停止するにはWindows PCで `tailscale serve reset` を実行してください（他のServe設定も削除されるため注意）。JARVISを終了するとローカルサーバーも停止します。
+
+**開発状況:** Windows実機でのビルド・接続・操作テストは未完了です。GitHubの安定版mainにはまだ反映していません。
