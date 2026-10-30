@@ -1,0 +1,15 @@
+name = "jarvis-remote"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+[[durable_objects.bindings]]
+name = "RELAY"
+class_name = "JarvisRelay"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["JarvisRelay"]
+
+# Set a strong secret using:
+# npx wrangler secret put JARVIS_REMOTE_TOKEN
+# Do not put the token in this file or Git.

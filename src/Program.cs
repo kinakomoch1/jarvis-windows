@@ -32,17 +32,50 @@ public sealed class JarvisForm : Form
     private readonly Button screenButton = new() { Text = "画面をAIに見せる", Width = 155, Height = 30, BackColor = Color.FromArgb(0, 105, 140), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
     private readonly CheckBox startup = new() { Text = "Windowsと同時に起動", AutoSize = true, ForeColor = Color.White };
     private readonly CheckBox listening = new() { Text = "呼びかけを検出", Checked = true, AutoSize = true, ForeColor = Color.White };
+    private readonly CheckBox proactive = new() { Text = "PCを自動監視", Checked = true, AutoSize = true, ForeColor = Color.White };
+    private readonly System.Windows.Forms.Timer healthTimer = new() { Interval = 60000 };
+    private DateTime lastMemoryAlert = DateTime.MinValue;
+    private bool memoryWarningActive;
     private readonly NotifyIcon tray;
     private readonly SpeechSynthesizer speaker = new();
     private SpeechRecognitionEngine? recognizer;
+    private Grammar? wakeGrammar;
+    private Grammar? appLaunchGrammar;
+    private Grammar? commandGrammar;
+    private Grammar? dictationGrammar;
     private bool awake = false;
     private bool busy = false;
     private bool exiting = false;
-    private readonly System.Windows.Forms.Timer voiceWindow = new() { Interval = 20000 };
+    private readonly System.Windows.Forms.Timer voiceWindow = new() { Interval = 120000 };
+    private const int VoiceHotkeyId = 0x4A41;
+    [DllImport("user32.dll", SetLastError = true)] private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint modifiers, uint key);
+    [DllImport("user32.dll")] private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        if (!RegisterHotKey(Handle, VoiceHotkeyId, 0x0003, (uint)Keys.J))
+            Log("Ctrl+Alt+Jの登録に失敗しました。他のアプリと競合している可能性があります。");
+    }
+    protected override void OnHandleDestroyed(EventArgs e)
+    {
+        UnregisterHotKey(Handle, VoiceHotkeyId);
+        base.OnHandleDestroyed(e);
+    }
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg == 0x0312 && m.WParam.ToInt32() == VoiceHotkeyId)
+        {
+            if (!listening.Checked) { listening.Checked = true; Say("呼びかけ検出をオンにしました。"); }
+            return;
+        }
+        base.WndProc(ref m);
+    }
     [DllImport("user32.dll")] private static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
     private static void KeyTap(byte vk) { keybd_event(vk, 0, 0, UIntPtr.Zero); keybd_event(vk, 0, 2, UIntPtr.Zero); }
     private static void Hotkey(byte last) { keybd_event(0x11, 0, 0, UIntPtr.Zero); keybd_event(0x10, 0, 0, UIntPtr.Zero); KeyTap(last); keybd_event(0x10, 0, 2, UIntPtr.Zero); keybd_event(0x11, 0, 2, UIntPtr.Zero); }
     private readonly HttpClient http = new() { Timeout = TimeSpan.FromMinutes(5) };
+    private RemoteControlServer? remote;
+    private CloudRemoteClient? cloudRemote;
     private readonly List<(string Role, string Content)> history = new();
 
     public JarvisForm()
@@ -63,6 +96,13 @@ public sealed class JarvisForm : Form
         top.Controls.Add(apiKey);
         top.Controls.Add(startup);
         top.Controls.Add(listening);
+        top.Controls.Add(proactive);
+        var remoteButton = new Button { Text = "iPhone連携", Width = 110, Height = 30 };
+        remoteButton.Click += (_, _) => ShowRemoteSetup();
+        top.Controls.Add(remoteButton);
+        var cloudButton = new Button { Text = "クラウド連携", Width = 115, Height = 30 };
+        cloudButton.Click += (_, _) => ShowCloudSetup();
+        top.Controls.Add(cloudButton);
         top.Controls.Add(screenButton);
         screenButton.Click += async (_, _) => await AnalyzeScreenAsync();
         Controls.Add(top);
@@ -91,9 +131,117 @@ public sealed class JarvisForm : Form
         startup.Checked = GetStartup();
         startup.CheckedChanged += (_, _) => SetStartup(startup.Checked);
         listening.CheckedChanged += (_, _) => { if (listening.Checked) StartRecognition(); else StopRecognition(); };
-        voiceWindow.Tick += (_, _) => { awake = false; voiceWindow.Stop(); Log("音声指示の受付を終了しました。"); };
+        proactive.CheckedChanged += (_, _) => { if (proactive.Checked) { CheckHealth(); healthTimer.Start(); } else healthTimer.Stop(); };
+        healthTimer.Tick += (_, _) => CheckHealth();
+        voiceWindow.Tick += (_, _) => { awake = false; voiceWindow.Stop(); if (wakeGrammar != null) wakeGrammar.Enabled = true; if (commandGrammar != null) commandGrammar.Enabled = false; if (appLaunchGrammar != null) appLaunchGrammar.Enabled = false; if (dictationGrammar != null) dictationGrammar.Enabled = false; Log("音声指示の受付を終了しました。"); };
         try { speaker.SetOutputToDefaultAudioDevice(); SelectVoice(); } catch (Exception ex) { Log("音声合成を初期化できません: " + ex.Message); }
-        Shown += (_, _) => { Log("起動しました。『ジャービス』と呼びかけるか、文字を入力してください。"); StartRecognition(); };
+        Shown += (_, _) => { StartRemote(); Log("起動しました。『ジャービス』と呼びかけるか、文字を入力してください。"); StartRecognition(); if (proactive.Checked) { CheckHealth(); healthTimer.Start(); } };
+    }
+
+    private void ShowCloudSetup()
+    {
+        using var dialog = new Form { Text = "JARVIS クラウド連携", Size = new Size(540, 250), StartPosition = FormStartPosition.CenterParent };
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), RowCount = 5, ColumnCount = 1 };
+        var url = new TextBox { Dock = DockStyle.Top, PlaceholderText = "https://jarvis-remote.***.workers.dev" };
+        var secret = new TextBox { Dock = DockStyle.Top, UseSystemPasswordChar = true, PlaceholderText = "Cloudflareに設定したアクセスキー" };
+        var connect = new Button { Text = "接続", Dock = DockStyle.Top };
+        var disconnect = new Button { Text = "切断", Dock = DockStyle.Top };
+        layout.Controls.Add(new Label { Text = "Cloudflare WorkerのHTTPS URL", AutoSize = true });
+        layout.Controls.Add(url);
+        layout.Controls.Add(secret);
+        layout.Controls.Add(connect);
+        layout.Controls.Add(disconnect);
+        dialog.Controls.Add(layout);
+        connect.Click += (_, _) =>
+        {
+            try
+            {
+                var next = new CloudRemoteClient(url.Text.Trim(), secret.Text, RemoteLaunchAsync,
+                    () => { var m = PcHealth.ReadMemory(); return $"メモリ {m.Percent}% / Fortnite {(IsGaming() ? "起動中" : "停止中")}"; }, Log);
+                cloudRemote?.Dispose();
+                cloudRemote = next;
+                next.Start();
+                Log("クラウド連携を開始しました。");
+                dialog.Close();
+            }
+            catch (Exception ex) { MessageBox.Show(ex.Message, "接続できません"); }
+        };
+        disconnect.Click += (_, _) => { cloudRemote?.Dispose(); cloudRemote = null; Log("クラウド連携を停止しました。"); dialog.Close(); };
+        dialog.ShowDialog(this);
+    }
+
+    private void StartRemote()
+    {
+        try
+        {
+            remote = new RemoteControlServer(RemoteLaunchAsync, () =>
+            {
+                var m = PcHealth.ReadMemory();
+                return $"JARVISオンライン / メモリ {m.Percent}% / Fortnite {(IsGaming() ? "起動中" : "停止中")}";
+            });
+            remote.Start();
+            Log("iPhone連携: PC内のローカル接続のみ有効です。外部公開はTailscale Serveを設定してください。");
+        }
+        catch (Exception ex) { Log("iPhone連携を開始できません: " + ex.Message); remote?.Dispose(); remote = null; }
+    }
+
+    private void ShowRemoteSetup()
+    {
+        if (remote == null) { MessageBox.Show("リモートサーバーは起動していません。ログをご確認ください。"); return; }
+        var text = $"ローカルURL: {RemoteControlServer.LocalUrl}\\n\\nアクセスキー: {remote.AccessToken}\\n\\niPhoneからの接続にはTailscaleをPCとiPhoneにインストールし、PC側で次を実行してください。\\n\\ntailscale serve --bg 18741\\n\\nTailscaleが表示するHTTPSのURLをiPhoneで開いてください。アクセスキーは他人に見せないでください。";
+        MessageBox.Show(text, "JARVIS iPhone連携", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
+    private Task<bool> RemoteLaunchAsync(string app)
+    {
+        var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (IsDisposed || !IsHandleCreated) { completion.SetResult(false); return completion.Task; }
+        try
+        {
+            BeginInvoke(async () =>
+            {
+                try
+                {
+                    var target = app switch { "fortnite" => "フォートナイト", "spotify" => "Spotify", "discord" => "Discord", _ => "" };
+                    if (target.Length == 0) { completion.TrySetResult(false); return; }
+                    await LaunchApplicationAsync(target);
+                    completion.TrySetResult(true);
+                }
+                catch (Exception ex) { Log("リモート起動エラー: " + ex.Message); completion.TrySetResult(false); }
+            });
+        }
+        catch { completion.TrySetResult(false); }
+        return completion.Task;
+    }
+
+    private static bool IsGaming()
+    {
+        // Avoid interrupting Fortnite; additional games can be added here.
+        try { return Process.GetProcessesByName("FortniteClient-Win64-Shipping").Length > 0; }
+        catch { return false; }
+    }
+
+    private void CheckHealth()
+    {
+        try
+        {
+            var m = PcHealth.ReadMemory();
+            if (m.Percent < 75) { memoryWarningActive = false; return; }
+            if (m.Percent < 85 || (memoryWarningActive && DateTime.UtcNow - lastMemoryAlert < TimeSpan.FromHours(1))) return;
+            memoryWarningActive = true;
+            lastMemoryAlert = DateTime.UtcNow;
+            var message = $"PCのメモリ使用率が{m.Percent}パーセントです。不要なアプリやタブの整理をおすすめします。";
+            Log("自動監視: " + message);
+            if (IsGaming())
+            {
+                // No speech or focus-stealing windows during Fortnite.
+                tray.BalloonTipTitle = "JARVIS PC監視";
+                tray.BalloonTipText = message;
+                tray.ShowBalloonTip(4000);
+            }
+            else Say(message);
+        }
+        catch (Exception ex) { Log("PC監視エラー: " + ex.Message); healthTimer.Stop(); }
     }
 
     private void ShowWindow() { Show(); WindowState = FormWindowState.Normal; Activate(); }
@@ -116,39 +264,96 @@ public sealed class JarvisForm : Form
         if (recognizer != null || !listening.Checked) return;
         try
         {
-            var info = SpeechRecognitionEngine.InstalledRecognizers().FirstOrDefault(r => r.Culture.Name.StartsWith("ja", StringComparison.OrdinalIgnoreCase));
+            var info = SpeechRecognitionEngine.InstalledRecognizers()
+                .FirstOrDefault(r => r.Culture.Name.StartsWith("ja", StringComparison.OrdinalIgnoreCase));
             if (info == null) { Log("日本語のWindows音声認識エンジンが見つかりません。"); return; }
+
             recognizer = new SpeechRecognitionEngine(info);
             var wake = new Choices("ジャービス", "じゃーびす", "ジャービス起動");
-            recognizer.LoadGrammar(new Grammar(new GrammarBuilder(wake) { Culture = info.Culture }) { Name = "Wake" });
-            // Wake and dictation grammars coexist; commands are only acted on after wake.
-            recognizer.LoadGrammar(new DictationGrammar { Name = "FreeSpeech" });
+            wakeGrammar = new Grammar(new GrammarBuilder(wake) { Culture = info.Culture }) { Name = "Wake" };
+            recognizer.LoadGrammar(wakeGrammar);
+
+            // A fixed grammar makes essential local actions more reliable than dictation alone.
+            var commands = new Choices(
+                "フォートナイトを起動して", "フォートナイトを開いて",
+                "フォートナイト起動", "フォートナイト開いて",
+                "グーグルクロームを開いて", "グーグルクロームを起動して",
+                "Google Chromeを開いて", "Chromeを開いて",
+                "Spotifyを開いて", "Spotifyを起動して",
+                "スポティファイを開いて", "スポティファイを起動して",
+                "TikTokを開いて", "ティックトックを開いて", "ティックトックを起動して",
+                "Xを開いて", "エックスを開いて", "ツイッターを開いて",
+                "VyLiteを開いて", "VyLiteを起動して", "バイライトを開いて", "バイライトを起動して",
+                "Discordのミュートを切り替えて", "ディスコードのミュートを切り替えて",
+                "Discordのマイクミュートを切り替えて", "ディスコードのマイクミュートを切り替えて",
+                "Discordのスピーカーミュートを切り替えて", "ディスコードのスピーカーミュートを切り替えて",
+                "Discordのスピーカーミュート切り替え", "ディスコードのスピーカーミュート切り替え",
+                "Discordのミュートを解除して", "ディスコードのミュートを解除して",
+                "Discordのミュートをオンにして", "ディスコードのミュートをオンにして",
+                "Discordのミュートをオフにして", "ディスコードのミュートをオフにして",
+                "ディスコードを起動して", "ディスコードを開いて",
+                "メモ帳を起動して", "メモ帳を開いて",
+                "ブラウザを起動して", "ブラウザを開いて",
+                "電卓を起動して", "電卓を開いて",
+                "メモリの状態を教えて", "PCの状態を教えて",
+                "呼びかけ検出をオフにして", "音声認識をオフにして",
+                "ファイルを開いて", "ファイルを起動して");
+            // Combinatorial grammar: app names and verbs can be mixed without
+            // hardcoding every full phrase. Dictation remains available as fallback.
+            var appNames = new Choices(
+                "YouTube", "ユーチューブ", "Twitch", "ツイッチ",
+                "Google", "グーグル", "Gmail", "ジーメール",
+                "GitHub", "ギットハブ", "Instagram", "インスタ",
+                "Netflix", "ネットフリックス", "ABEMA", "アベマ",
+                "ニコニコ動画", "Amazon", "アマゾン",
+                "Wikipedia", "ウィキペディア", "ChatGPT", "チャットGPT",
+                "Canva", "キャンバ", "Googleマップ", "グーグルマップ",
+                "OBS", "Steam", "スチーム", "エクスプローラー",
+                "ペイント", "タスクマネージャー", "設定", "ファイル");
+            var verbs = new Choices("を開いて", "を起動して", "を開いてください", "を起動してください");
+            var combined = new GrammarBuilder { Culture = info.Culture };
+            combined.Append(appNames);
+            combined.Append(verbs);
+            appLaunchGrammar = new Grammar(combined) { Name = "AppLaunch", Enabled = false };
+            recognizer.LoadGrammar(appLaunchGrammar);
+            commandGrammar = new Grammar(new GrammarBuilder(commands) { Culture = info.Culture }) { Name = "Commands", Enabled = false };
+            recognizer.LoadGrammar(commandGrammar);
+            dictationGrammar = new DictationGrammar { Name = "FreeSpeech", Enabled = false };
+            recognizer.LoadGrammar(dictationGrammar);
             recognizer.SetInputToDefaultAudioDevice();
             recognizer.SpeechRecognized += (_, e) =>
             {
                 var heard = e.Result.Text.Trim();
-                var isWake = heard.Contains("ジャービス") || heard.Contains("じゃーびす");
-                if (e.Result.Confidence < (isWake ? 0.68 : 0.55)) return;
+                var isWake = e.Result.Grammar.Name == "Wake";
+                if (e.Result.Confidence < (isWake ? 0.60 : 0.45)) return;
+                if (!IsHandleCreated || IsDisposed) return;
                 BeginInvoke(async () =>
                 {
-                    if (speaker.State == SynthesizerState.Speaking || busy) return;
+                    if (busy || IsDisposed) return;
                     Log("音声認識: " + heard);
                     if (isWake)
                     {
+                        if (awake) return;
                         awake = true;
+                        if (wakeGrammar != null) wakeGrammar.Enabled = false;
                         voiceWindow.Stop();
                         voiceWindow.Start();
+                        if (commandGrammar != null) commandGrammar.Enabled = true;
+                        if (appLaunchGrammar != null) appLaunchGrammar.Enabled = true;
+                        if (dictationGrammar != null) dictationGrammar.Enabled = true;
                         Say("はい、何でしょうか？");
                         return;
                     }
                     if (!awake) return;
-                    awake = false;
+                    // The speech synthesizer may still report Speaking briefly after playback.
+                    // Only act on recognized commands; do not drop them based on TTS state.
                     voiceWindow.Stop();
+                    voiceWindow.Start();
                     await HandleCommandAsync(heard);
                 });
             };
             recognizer.RecognizeAsync(RecognizeMode.Multiple);
-            Log("音声認識を開始しました。呼びかけ後20秒間、自由な指示を受け付けます。");
+            Log("音声認識を開始しました。呼びかけ後は2分間連続して指示できます。Ctrl+Alt+Jで再開できます。");
         }
         catch (Exception ex) { Log("音声認識を開始できません: " + ex.Message); StopRecognition(); }
     }
@@ -159,6 +364,10 @@ public sealed class JarvisForm : Form
         if (recognizer == null) return;
         try { recognizer.RecognizeAsyncCancel(); recognizer.Dispose(); } catch { }
         recognizer = null;
+        wakeGrammar = null;
+        appLaunchGrammar = null;
+        commandGrammar = null;
+        dictationGrammar = null;
     }
     private static bool GetStartup()
     {
@@ -180,6 +389,13 @@ public sealed class JarvisForm : Form
         Log("あなた: " + input);
         try
         {
+            if (input is "呼びかけ検出をオフにして" or "音声認識をオフにして" or "呼びかけをオフにして")
+            {
+                Log("音声認識を停止します。再開はCtrl+Alt+Jです。");
+                listening.Checked = false;
+                Say("呼びかけ検出をオフにしました。再開するにはコントロール、オルト、ジェイを押してください。");
+                return;
+            }
             if (input.Contains("おやすみ")) { awake = false; Say("承知しました。またいつでもお呼びください。"); return; }
             // 音声とテキストは同じコマンドルーターを通す。
             if (TryHandleDiscordOrSpotify(input)) return;
@@ -192,9 +408,8 @@ public sealed class JarvisForm : Form
             }
             if (input.Contains("状態") || input.Contains("メモリ"))
             {
-                var info = GC.GetGCMemoryInfo();
-                var total = info.TotalAvailableMemoryBytes / 1024 / 1024;
-                Say($"JARVISの実行環境で利用可能なメモリの目安は {total} メガバイトです。PC全体の診断機能は今後追加します。"); return;
+                var m = PcHealth.ReadMemory();
+                Say($"PCのメモリ使用率は{m.Percent}パーセントです。{m.TotalGiB}ギガバイト中、{m.UsedGiB}ギガバイトを使用しています。"); return;
             }
             if (provider.SelectedIndex == 2) { Say("現在はローカルモードです。AIとの会話にはプロバイダーを選択してAPIキーを入力してください。"); return; }
             if (provider.SelectedIndex != 3 && string.IsNullOrWhiteSpace(apiKey.Text)) { Say("APIキーを入力してください。"); return; }
@@ -266,7 +481,7 @@ public sealed class JarvisForm : Form
             if (!Process.GetProcessesByName("Discord").Any()) { Say("Discordが起動していません。"); return true; }
             var deafen = text.Contains("スピーカー") || text.Contains("聞こえ") || text.Contains("デフン");
             Hotkey(deafen ? (byte)0x44 : (byte)0x4D);
-            Say(deafen ? "Discordのスピーカーミュート切り替えを送信しました。" : "Discordのマイクミュート切り替えを送信しました。");
+            Say(deafen ? "Discordのスピーカーミュート切り替えキーを送信しました。現在の状態は確認できません。" : "Discordのマイクミュート切り替えキーを送信しました。現在の状態は確認できません。");
             return true;
         }
         if (spotify && (text.Contains("再生") || text.Contains("流して") || text.Contains("かけて") || text.Contains("止め") || text.Contains("一時停止")))
@@ -335,18 +550,88 @@ public sealed class JarvisForm : Form
     private async Task LaunchApplicationAsync(string target)
     {
         var normalized = NormalizeAppName(target);
+        var websites = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["youtube"] = "https://www.youtube.com/",
+            ["ユーチューブ"] = "https://www.youtube.com/",
+            ["ようつべ"] = "https://www.youtube.com/",
+            ["twitch"] = "https://www.twitch.tv/",
+            ["ツイッチ"] = "https://www.twitch.tv/",
+            ["google"] = "https://www.google.com/",
+            ["グーグル"] = "https://www.google.com/",
+            ["gmail"] = "https://mail.google.com/",
+            ["ジーメール"] = "https://mail.google.com/",
+            ["github"] = "https://github.com/",
+            ["ギットハブ"] = "https://github.com/",
+            ["discordweb"] = "https://discord.com/app",
+            ["ディスコードウェブ"] = "https://discord.com/app",
+            ["instagram"] = "https://www.instagram.com/",
+            ["インスタグラム"] = "https://www.instagram.com/",
+            ["インスタ"] = "https://www.instagram.com/",
+            ["netflix"] = "https://www.netflix.com/",
+            ["ネットフリックス"] = "https://www.netflix.com/",
+            ["abema"] = "https://abema.tv/",
+            ["アベマ"] = "https://abema.tv/",
+            ["ニコニコ"] = "https://www.nicovideo.jp/",
+            ["ニコニコ動画"] = "https://www.nicovideo.jp/",
+            ["amazon"] = "https://www.amazon.co.jp/",
+            ["アマゾン"] = "https://www.amazon.co.jp/",
+            ["wikipedia"] = "https://ja.wikipedia.org/",
+            ["ウィキペディア"] = "https://ja.wikipedia.org/",
+            ["chatgpt"] = "https://chatgpt.com/",
+            ["チャットgpt"] = "https://chatgpt.com/",
+            ["canva"] = "https://www.canva.com/",
+            ["キャンバ"] = "https://www.canva.com/",
+            ["googleマップ"] = "https://www.google.com/maps",
+            ["グーグルマップ"] = "https://www.google.com/maps"
+        };
+        if (websites.TryGetValue(normalized, out var websiteUrl))
+        {
+            Process.Start(new ProcessStartInfo(websiteUrl) { UseShellExecute = true });
+            Say(target + "をブラウザで開くよう指示しました。");
+            return;
+        }
+        if (normalized is "tiktok" or "ティックトック" or "ティクトック")
+        {
+            Process.Start(new ProcessStartInfo("https://www.tiktok.com/") { UseShellExecute = true });
+            Say("TikTokをブラウザで開くよう指示しました。");
+            return;
+        }
+        if (normalized is "x" or "エックス" or "ツイッター" or "twitter")
+        {
+            Process.Start(new ProcessStartInfo("https://x.com/") { UseShellExecute = true });
+            Say("Xをブラウザで開くよう指示しました。");
+            return;
+        }
+        if (normalized is "vylite" or "バイライト" or "ブイライト" or "ヴァイライト" or "ヴィライト")
+        {
+            await LaunchVyLiteAsync();
+            return;
+        }
+        if (normalized is "spotify" or "スポティファイ" or "スポティファイー")
+        {
+            await LaunchSpotifyAsync();
+            return;
+        }
+        if (normalized is "フォートナイト" or "fortnite" or "フォトナ")
+        {
+            await LaunchFortniteAsync();
+            return;
+        }
         // 起動先を固定したWindows標準アプリ。AI生成コマンドや任意のシェル文字列は実行しない。
         var builtins = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
             ["エクスプローラー"] = "explorer.exe", ["エクスプローラ"] = "explorer.exe",
-            ["ファイルエクスプローラー"] = "explorer.exe",
+            ["ファイルエクスプローラー"] = "explorer.exe", ["ファイル"] = "explorer.exe",
             ["メモ帳"] = "notepad.exe", ["notepad"] = "notepad.exe",
             ["電卓"] = "calc.exe", ["calculator"] = "calc.exe",
             ["ペイント"] = "mspaint.exe", ["paint"] = "mspaint.exe",
             ["タスクマネージャー"] = "taskmgr.exe", ["タスクマネージャ"] = "taskmgr.exe",
             ["コントロールパネル"] = "control.exe", ["設定"] = "ms-settings:",
             ["ブラウザ"] = "https://www.google.com", ["ブラウザー"] = "https://www.google.com", ["ウェブ"] = "https://www.google.com",
-            ["discord"] = "discord://", ["ディスコード"] = "discord://"
+            ["discord"] = "discord://", ["ディスコード"] = "discord://",
+            ["googlechrome"] = "https://www.google.com", ["グーグルクローム"] = "https://www.google.com",
+            ["chrome"] = "https://www.google.com"
         };
         var builtin = builtins.FirstOrDefault(x => NormalizeAppName(x.Key) == normalized);
         if (builtin.Key != null)
@@ -374,6 +659,117 @@ public sealed class JarvisForm : Form
         if (result != DialogResult.Yes) { Say("起動をキャンセルしました。"); return; }
         Process.Start(new ProcessStartInfo(app.Path) { UseShellExecute = true });
         Say($"{app.Name}を起動しました。");
+    }
+
+    private async Task LaunchVyLiteAsync()
+    {
+        // VyLite is a privileged optimizer: only start a shortcut explicitly installed by the user.
+        // Never run a downloaded installer or search arbitrary executable paths.
+        var apps = await Task.Run(FindInstalledApps);
+        var matches = apps.Where(x => NormalizeAppName(x.Name) == "vylite").ToList();
+        if (matches.Count == 0)
+        {
+            Say("VyLiteのショートカットが見つかりません。スタートメニューにVyLiteのショートカットを追加してください。");
+            return;
+        }
+        if (matches.Count > 1)
+        {
+            Say("VyLiteのショートカットが複数あります。整理してからお試しください。");
+            return;
+        }
+        var result = MessageBox.Show(
+            $"VyLiteを起動しますか？\\n{matches[0].Path}\\n起動時に管理者権限の確認が表示される場合があります。",
+            "JARVIS VyLite起動確認", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+        if (result != DialogResult.Yes) { Say("起動をキャンセルしました。"); return; }
+        Process.Start(new ProcessStartInfo(matches[0].Path) { UseShellExecute = true });
+        Say("VyLiteの起動を指示しました。");
+    }
+
+    private async Task LaunchSpotifyAsync()
+    {
+        try
+        {
+            if (Process.GetProcessesByName("Spotify").Any())
+            {
+                Say("Spotifyはすでに起動しています。");
+                return;
+            }
+
+            // Prefer an installed shortcut, which handles classic and Store installations.
+            var apps = await Task.Run(FindInstalledApps);
+            var shortcuts = apps.Where(x => NormalizeAppName(x.Name) == "spotify").ToList();
+            if (shortcuts.Count == 1)
+            {
+                Process.Start(new ProcessStartInfo(shortcuts[0].Path) { UseShellExecute = true });
+                Say("Spotifyの起動を指示しました。");
+                return;
+            }
+            if (shortcuts.Count > 1)
+            {
+                Say("Spotifyのショートカットが複数見つかりました。スタートメニューを確認してください。");
+                return;
+            }
+
+            // Spotify's registered URI handler can launch either the desktop or Store app.
+            using (var spotifyProtocol = Registry.ClassesRoot.OpenSubKey("spotify"))
+            {
+                if (spotifyProtocol?.GetValue("URL Protocol") != null)
+                {
+                    Process.Start(new ProcessStartInfo("spotify:") { UseShellExecute = true });
+                    Say("Spotifyの起動を指示しました。");
+                    return;
+                }
+            }
+
+            // Traditional per-user desktop installation.
+            var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            var executable = Path.Combine(local, "Spotify", "Spotify.exe");
+            if (File.Exists(executable))
+            {
+                Process.Start(new ProcessStartInfo(executable) { UseShellExecute = true });
+                Say("Spotifyの起動を指示しました。");
+                return;
+            }
+            Say("Spotifyの起動先が見つかりませんでした。Spotifyを一度手動で開いてからお試しください。");
+        }
+        catch (Exception ex)
+        {
+            Log("Spotify起動エラー: " + ex.Message);
+            Say("Spotifyを起動できませんでした。ログをご確認ください。");
+        }
+    }
+
+    private async Task LaunchFortniteAsync()
+    {
+        // Never launch arbitrary executables or AI-generated shell commands.
+        if (IsGaming()) { Say("フォートナイトはすでに起動しています。"); return; }
+        var apps = await Task.Run(FindInstalledApps);
+        var shortcuts = apps.Where(x => NormalizeAppName(x.Name) == "fortnite").ToList();
+        if (shortcuts.Count == 1)
+        {
+            Process.Start(new ProcessStartInfo(shortcuts[0].Path) { UseShellExecute = true });
+            Say("フォートナイトの起動を指示しました。");
+            return;
+        }
+        if (shortcuts.Count > 1)
+        {
+            Say("フォートナイトのショートカットが複数見つかりました。1つに整理してからお試しください。");
+            return;
+        }
+
+        // Epic Games Launcher registers this URI scheme on supported installations.
+        // Check registration before invoking the fixed, allowlisted Fortnite URI.
+        using var epicProtocol = Registry.ClassesRoot.OpenSubKey("com.epicgames.launcher");
+        if (epicProtocol?.GetValue("URL Protocol") != null)
+        {
+            Process.Start(new ProcessStartInfo("com.epicgames.launcher://apps/Fortnite?action=launch&silent=true")
+            {
+                UseShellExecute = true
+            });
+            Say("Epic Games Launcherにフォートナイトの起動を指示しました。");
+            return;
+        }
+        Say("フォートナイトのショートカットまたはEpic Games Launcherが見つかりません。デスクトップにフォートナイトのショートカットを作成してください。");
     }
 
     private async Task AnalyzeScreenAsync()
@@ -503,7 +899,7 @@ public sealed class JarvisForm : Form
     }
     protected override void Dispose(bool disposing)
     {
-        if (disposing) { StopRecognition(); tray.Visible = false; tray.Dispose(); speaker.Dispose(); http.Dispose(); }
+        if (disposing) { cloudRemote?.Dispose(); remote?.Dispose(); healthTimer.Stop(); healthTimer.Dispose(); voiceWindow.Dispose(); StopRecognition(); tray.Visible = false; tray.Dispose(); speaker.Dispose(); http.Dispose(); }
         base.Dispose(disposing);
     }
 }
