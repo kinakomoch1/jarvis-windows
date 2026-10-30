@@ -74,6 +74,7 @@ public sealed class JarvisForm : Form
     private static void KeyTap(byte vk) { keybd_event(vk, 0, 0, UIntPtr.Zero); keybd_event(vk, 0, 2, UIntPtr.Zero); }
     private static void Hotkey(byte last) { keybd_event(0x11, 0, 0, UIntPtr.Zero); keybd_event(0x10, 0, 0, UIntPtr.Zero); KeyTap(last); keybd_event(0x10, 0, 2, UIntPtr.Zero); keybd_event(0x11, 0, 2, UIntPtr.Zero); }
     private readonly HttpClient http = new() { Timeout = TimeSpan.FromMinutes(5) };
+    private RemoteControlServer? remote;
     private readonly List<(string Role, string Content)> history = new();
 
     public JarvisForm()
@@ -95,6 +96,9 @@ public sealed class JarvisForm : Form
         top.Controls.Add(startup);
         top.Controls.Add(listening);
         top.Controls.Add(proactive);
+        var remoteButton = new Button { Text = "iPhone連携", Width = 110, Height = 30 };
+        remoteButton.Click += (_, _) => ShowRemoteSetup();
+        top.Controls.Add(remoteButton);
         top.Controls.Add(screenButton);
         screenButton.Click += async (_, _) => await AnalyzeScreenAsync();
         Controls.Add(top);
@@ -127,7 +131,51 @@ public sealed class JarvisForm : Form
         healthTimer.Tick += (_, _) => CheckHealth();
         voiceWindow.Tick += (_, _) => { awake = false; voiceWindow.Stop(); if (wakeGrammar != null) wakeGrammar.Enabled = true; if (commandGrammar != null) commandGrammar.Enabled = false; if (appLaunchGrammar != null) appLaunchGrammar.Enabled = false; if (dictationGrammar != null) dictationGrammar.Enabled = false; Log("音声指示の受付を終了しました。"); };
         try { speaker.SetOutputToDefaultAudioDevice(); SelectVoice(); } catch (Exception ex) { Log("音声合成を初期化できません: " + ex.Message); }
-        Shown += (_, _) => { Log("起動しました。『ジャービス』と呼びかけるか、文字を入力してください。"); StartRecognition(); if (proactive.Checked) { CheckHealth(); healthTimer.Start(); } };
+        Shown += (_, _) => { StartRemote(); Log("起動しました。『ジャービス』と呼びかけるか、文字を入力してください。"); StartRecognition(); if (proactive.Checked) { CheckHealth(); healthTimer.Start(); } };
+    }
+
+    private void StartRemote()
+    {
+        try
+        {
+            remote = new RemoteControlServer(RemoteLaunchAsync, () =>
+            {
+                var m = PcHealth.ReadMemory();
+                return $"JARVISオンライン / メモリ {m.Percent}% / Fortnite {(IsGaming() ? "起動中" : "停止中")}";
+            });
+            remote.Start();
+            Log("iPhone連携: PC内のローカル接続のみ有効です。外部公開はTailscale Serveを設定してください。");
+        }
+        catch (Exception ex) { Log("iPhone連携を開始できません: " + ex.Message); remote?.Dispose(); remote = null; }
+    }
+
+    private void ShowRemoteSetup()
+    {
+        if (remote == null) { MessageBox.Show("リモートサーバーは起動していません。ログをご確認ください。"); return; }
+        var text = $"ローカルURL: {RemoteControlServer.LocalUrl}\\n\\nアクセスキー: {remote.AccessToken}\\n\\niPhoneからの接続にはTailscaleをPCとiPhoneにインストールし、PC側で次を実行してください。\\n\\ntailscale serve --bg 18741\\n\\nTailscaleが表示するHTTPSのURLをiPhoneで開いてください。アクセスキーは他人に見せないでください。";
+        MessageBox.Show(text, "JARVIS iPhone連携", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
+    private Task<bool> RemoteLaunchAsync(string app)
+    {
+        var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (IsDisposed || !IsHandleCreated) { completion.SetResult(false); return completion.Task; }
+        try
+        {
+            BeginInvoke(async () =>
+            {
+                try
+                {
+                    var target = app switch { "fortnite" => "フォートナイト", "spotify" => "Spotify", "discord" => "Discord", _ => "" };
+                    if (target.Length == 0) { completion.TrySetResult(false); return; }
+                    await LaunchApplicationAsync(target);
+                    completion.TrySetResult(true);
+                }
+                catch (Exception ex) { Log("リモート起動エラー: " + ex.Message); completion.TrySetResult(false); }
+            });
+        }
+        catch { completion.TrySetResult(false); }
+        return completion.Task;
     }
 
     private static bool IsGaming()
@@ -815,7 +863,7 @@ public sealed class JarvisForm : Form
     }
     protected override void Dispose(bool disposing)
     {
-        if (disposing) { healthTimer.Stop(); healthTimer.Dispose(); voiceWindow.Dispose(); StopRecognition(); tray.Visible = false; tray.Dispose(); speaker.Dispose(); http.Dispose(); }
+        if (disposing) { remote?.Dispose(); healthTimer.Stop(); healthTimer.Dispose(); voiceWindow.Dispose(); StopRecognition(); tray.Visible = false; tray.Dispose(); speaker.Dispose(); http.Dispose(); }
         base.Dispose(disposing);
     }
 }
