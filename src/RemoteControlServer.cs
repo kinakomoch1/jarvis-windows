@@ -53,9 +53,10 @@ internal sealed class RemoteControlServer : IDisposable
             if (host != "127.0.0.1" && !host.EndsWith(".ts.net", StringComparison.OrdinalIgnoreCase))
             { ctx.Response.StatusCode = 403; return; }
             var origin = req.Headers["Origin"];
-            if (origin != null && !Uri.TryCreate(origin, UriKind.Absolute, out var originUri))
+            Uri? originUri = null;
+            if (origin != null && !Uri.TryCreate(origin, UriKind.Absolute, out originUri))
             { ctx.Response.StatusCode = 403; return; }
-            if (origin != null && (originUri!.Host != host || originUri.Scheme != (host == "127.0.0.1" ? "http" : "https")))
+            if (originUri != null && (originUri.Host != host || originUri.Scheme != (host == "127.0.0.1" ? "http" : "https")))
             { ctx.Response.StatusCode = 403; return; }
 
             if (req.HttpMethod == "GET" && req.Url?.AbsolutePath == "/")
