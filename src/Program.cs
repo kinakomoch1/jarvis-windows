@@ -200,6 +200,13 @@ public sealed class JarvisForm : Form
                 "TikTokを開いて", "ティックトックを開いて", "ティックトックを起動して",
                 "Xを開いて", "エックスを開いて", "ツイッターを開いて",
                 "VyLiteを開いて", "VyLiteを起動して", "バイライトを開いて", "バイライトを起動して",
+                "Discordのミュートを切り替えて", "ディスコードのミュートを切り替えて",
+                "Discordのマイクミュートを切り替えて", "ディスコードのマイクミュートを切り替えて",
+                "Discordのスピーカーミュートを切り替えて", "ディスコードのスピーカーミュートを切り替えて",
+                "Discordのスピーカーミュート切り替え", "ディスコードのスピーカーミュート切り替え",
+                "Discordのミュートを解除して", "ディスコードのミュートを解除して",
+                "Discordのミュートをオンにして", "ディスコードのミュートをオンにして",
+                "Discordのミュートをオフにして", "ディスコードのミュートをオフにして",
                 "ディスコードを起動して", "ディスコードを開いて",
                 "メモ帳を起動して", "メモ帳を開いて",
                 "ブラウザを起動して", "ブラウザを開いて",
@@ -390,7 +397,7 @@ public sealed class JarvisForm : Form
             if (!Process.GetProcessesByName("Discord").Any()) { Say("Discordが起動していません。"); return true; }
             var deafen = text.Contains("スピーカー") || text.Contains("聞こえ") || text.Contains("デフン");
             Hotkey(deafen ? (byte)0x44 : (byte)0x4D);
-            Say(deafen ? "Discordのスピーカーミュート切り替えを送信しました。" : "Discordのマイクミュート切り替えを送信しました。");
+            Say(deafen ? "Discordのスピーカーミュート切り替えキーを送信しました。現在の状態は確認できません。" : "Discordのマイクミュート切り替えキーを送信しました。現在の状態は確認できません。");
             return true;
         }
         if (spotify && (text.Contains("再生") || text.Contains("流して") || text.Contains("かけて") || text.Contains("止め") || text.Contains("一時停止")))
