@@ -59,3 +59,28 @@ JARVISの「iPhone連携」ボタンからアクセスキーを確認してく�
 停止するにはWindows PCで `tailscale serve reset` を実行してください（他のServe設定も削除されるため注意）。JARVISを終了するとローカルサーバーも停止します。
 
 **開発状況:** Windows実機でのビルド・接続・操作テストは未完了です。GitHubの安定版mainにはまだ反映していません。
+
+
+## Tailscale不要のiPhone遠隔操作（Cloudflare Workers、試験実装）
+
+iPhone Safari → Cloudflare Worker HTTPS → Durable Objectキュー ← Windows JARVISのHTTPSポーリング。ルーターのポート開放は不要です。
+
+### Cloudflareへのデプロイ
+1. CloudflareアカウントとNode.jsを用意し、リポジトリの `remote-cloud` フォルダーを開きます。
+2. `npx wrangler login` でログインします。
+3. 32文字以上のランダムなアクセスキーを生成し、`npx wrangler secret put JARVIS_REMOTE_TOKEN` で登録します。キーをGitHubに書き込まないでください。
+4. `npx wrangler deploy` を実行し、表示されたHTTPS URLを控えます。Durable Objectsの利用条件・料金はCloudflareで確認してください。
+
+### PCとiPhoneの接続
+1. 開発版JARVISの「クラウド連携」を開き、WorkerのHTTPS URLとアクセスキーを入力して接続します。
+2. iPhoneのSafariで同じURLを開き、アクセスキーを入力します。
+3. PC状態の確認、Fortnite・Spotify・Discordの起動ボタンを試します。
+4. Safariの「共有」→「ホーム画面に追加」でホーム画面に配置できます。
+
+### 制限とセキュリティ
+- HTTPSとアクセスキーが必須。PC側の受信ポートは不要です。
+- 実行できる操作は許可した3アプリの起動のみ。任意コマンドやファイル操作は受け付けません。
+- キーはPCに保存されず、JARVIS再起動後は再入力が必要です。
+- キーを知る人は遠隔操作できます。共有せず、漏れたらCloudflareのシークレットを更新してください。
+- 個人利用向けの試験実装で、アカウント別認証・端末別失効・ログイン試行回数制限は未実装です。
+- PCの電源とJARVISがオンである必要があります。Windows実機ビルド、Cloudflareデプロイ、iPhone接続は未検証です。mainには未反映です。
